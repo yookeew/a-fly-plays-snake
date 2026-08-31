@@ -259,7 +259,7 @@ def play(mode="human", seed=None, headless=False, episodes=1, fps=12,
 
     import pygame
     pygame.init()
-    CELL, HUD_H, PAD = 24, 150, 12
+    CELL, HUD_H, PAD = 24, 176, 12
     env = SnakeEnv(width, height, wrap, obs, retina, seed=seed)
     BW, BH = env.W * CELL, env.H * CELL
     screen = pygame.display.set_mode((BW + 2 * PAD, BH + 2 * PAD + HUD_H))
@@ -310,7 +310,9 @@ def play(mode="human", seed=None, headless=False, episodes=1, fps=12,
                 action = STRAIGHT
             else:
                 diff = (pending - env.dir) % 4
-                action = {0: STRAIGHT, 1: LEFT, 3: RIGHT}.get(diff, STRAIGHT)
+                # diff is how far to rotate to face `pending`; must match
+                # ACTION_TURN, where RIGHT is +1 and LEFT is -1 (mod 4).
+                action = {0: STRAIGHT, 1: RIGHT, 3: LEFT}.get(diff, STRAIGHT)
                 pending = None
             observation, _, _ = env.step(action)
 
@@ -362,8 +364,10 @@ def play(mode="human", seed=None, headless=False, episodes=1, fps=12,
             status += "  DEAD - R"
         elif paused:
             status += "  PAUSED"
-        screen.blit(big.render(status, True, COLORS["text"]),
-                    (BW + 2 * PAD - 260, hud_y + HUD_H - 28))
+        status_surf = big.render(status, True, COLORS["text"])
+        screen.blit(status_surf,
+                    ((BW + 2 * PAD - status_surf.get_width()) // 2,
+                     hud_y + HUD_H - 36))
         pygame.display.flip()
         clock.tick(fps)
 

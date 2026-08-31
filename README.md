@@ -17,3 +17,6 @@ are separate papers and want separate citations.
 
 Column names drift between releases. If a loader raises `KeyError`, print
 `df.columns` and adjust. That's expected maintenance, not a bug.
+
+
+data version: fafb v783
