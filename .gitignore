@@ -1,0 +1,59 @@
+# ---------------------------------------------------------------- environment
+.venv/
+venv/
+env/
+.python-version
+uv.lock
+
+# --------------------------------------------------------------------- python
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+build/
+dist/
+*.egg-info/
+
+# ------------------------------------------------------------------- notebooks
+.ipynb_checkpoints/
+
+# ------------------------------------------------------------------ connectome
+# The Codex exports are large (connections.csv is hundreds of MB) and are
+# redistributed under CC-BY from codex.flywire.ai -- keep them out of git and
+# let people download their own copy. Anything derived from them is a build
+# artifact, not source.
+data/
+*.csv
+*.csv.gz
+*.feather
+*.parquet
+*.npz
+*.npy
+
+# Keep the folder itself, and the note explaining what belongs in it.
+!data/README.md
+
+# ----------------------------------------------------------------- run outputs
+runs/
+checkpoints/
+*.pkl
+*.pt
+*.pth
+*.log
+
+# renders and figures
+*.gif
+*.mp4
+*.png
+!docs/*.png
+
+# ------------------------------------------------------------------------- os
+.DS_Store
+Thumbs.db
+
+# ------------------------------------------------------------------------ ides
+.vscode/
+.idea/
+*.swp
