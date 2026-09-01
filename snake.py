@@ -243,15 +243,22 @@ COLORS = {
 
 
 def play(mode="human", seed=None, headless=False, episodes=1, fps=12,
-         obs="feature", width=20, height=20, wrap=False, retina=7):
+         obs="feature", width=20, height=20, wrap=False, retina=7, policy=None):
+    # `policy` is any callable policy(env) -> action, optionally with a .reset()
+    # for per-episode state. When given it overrides `mode`. This is how watch.py
+    # drops a connectome-driven brain into the same renderer the human uses.
+    act = policy if policy is not None else greedy_bot
+
     if headless:
         scores = []
         for ep in range(episodes):
             env = SnakeEnv(width, height, wrap, obs, retina,
                            seed=None if seed is None else seed + ep)
+            if hasattr(act, "reset"):
+                act.reset()
             done = False
             while not done:
-                _, _, done = env.step(greedy_bot(env))
+                _, _, done = env.step(act(env))
             scores.append(env.score)
             print(f"episode {ep:3d}  score {env.score:3d}  steps {env.steps}")
         print(f"\nmean {np.mean(scores):.2f}  max {max(scores)}  min {min(scores)}")
@@ -286,6 +293,8 @@ def play(mode="human", seed=None, headless=False, episodes=1, fps=12,
                     running = False
                 elif e.key == pygame.K_r:
                     observation, pending = env.reset(), None
+                    if hasattr(act, "reset"):
+                        act.reset()
                 elif e.key == pygame.K_SPACE:
                     paused = not paused
                 # arrows / WASD = absolute direction, the classic feel.
@@ -304,8 +313,8 @@ def play(mode="human", seed=None, headless=False, episodes=1, fps=12,
                     pending = (env.dir - 1) % 4     # turn right
 
         if env.alive and not paused:
-            if mode == "bot":
-                action = greedy_bot(env)
+            if policy is not None or mode == "bot":
+                action = act(env)
             elif pending is None:
                 action = STRAIGHT
             else:
