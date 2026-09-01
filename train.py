@@ -33,8 +33,11 @@ import time
 import numpy as np
 
 from brain import make_synthetic, load_flywire
-from model import Brain
+from model import Brain, N_ACT
 from snake import SnakeEnv, FEATURE_NAMES, greedy_bot
+
+FOOD_SIN = FEATURE_NAMES.index("food_sin")
+FOOD_COS = FEATURE_NAMES.index("food_cos")
 
 
 # --------------------------------------------------------------------- rollout
@@ -124,6 +127,51 @@ def evaluate(brain, theta, n_envs, board, max_ticks, seed, max_idle=200):
     return fit.mean(), sc.mean(), sc.max()
 
 
+def warm_start_readout(brain, theta, k=4.0, n_batches=60, seed=0):
+    """Aim the readout at whatever descending neurons happen to carry the food
+    bearing, so ES refines from a policy that already turns toward food instead
+    of from the constant-action collapse it keeps falling into.
+
+    This trains NOTHING in the connectome -- it is a smarter initialisation of
+    the (already ours-to-train) linear readout. Drive the frozen brain with
+    random observations whose food channels sweep all bearings, ridge-regress
+    the descending activity onto [food_sin, food_cos], and wire that projection
+    into turn-left / straight / turn-right. ES then takes over.
+    """
+    rng = np.random.default_rng(seed)
+    params = brain.unpack_pop(theta[None, :])
+    B = 64
+    h = brain.initial_state_pop(1, B)
+    R, Y = [], []
+    for _ in range(n_batches):
+        obs = rng.normal(0, 1, (1, B, brain.cx.n_obs)).astype(brain.dtype)
+        ang = rng.uniform(-np.pi, np.pi, B)
+        obs[0, :, FOOD_SIN] = np.sin(ang)
+        obs[0, :, FOOD_COS] = np.cos(ang)
+        h, _ = brain.step_pop(h, obs, params)
+        r = np.clip(h[:, 0, :], 0.0, brain.r_max)          # (n, B)
+        r_out = r[brain.out_idx]
+        r_out = r_out - r_out.mean(axis=0, keepdims=True)   # match step_pop
+        R.append(r_out.T)
+        Y.append(np.c_[np.sin(ang), np.cos(ang)])
+    R = np.concatenate(R)
+    Y = np.concatenate(Y)
+    A = np.linalg.solve(R.T @ R + 1e-2 * np.eye(R.shape[1]), R.T @ Y)  # (n_out,2)
+
+    theta = theta.copy()
+    t = brain._t
+    W = np.zeros((N_ACT, brain.n_out))
+    # sign fixed empirically: food_sin > 0 means food is to the RIGHT, so
+    # turn-right wants +lateral. (ES would find this too, but starting on the
+    # right side of it is the whole point.)
+    W[0] = -k * A[:, 0]    # turn-left   <- food on the left
+    W[2] = k * A[:, 0]     # turn-right  <- food on the right
+    W[1] = k * A[:, 1]     # straight    <- food ahead
+    theta[t:t + N_ACT * brain.n_out] = W.ravel()
+    theta[t + N_ACT * brain.n_out:] = 0.0
+    return theta
+
+
 # ------------------------------------------------------------------- rank shape
 
 def rank_normalise(x):
@@ -138,10 +186,26 @@ def rank_normalise(x):
 
 def es_train(brain, *, generations=150, pop=64, sigma=0.06, lr=0.03,
              n_envs=8, board=12, max_ticks=350, max_idle=90, shaping=0.3,
-             gain_init=2.0, seed=0, eval_every=10, out=None):
+             gain_init=2.0, warm_start=True, readout_sigma_frac=0.25,
+             seed=0, eval_every=10, out=None):
     rng = np.random.default_rng(seed)
     theta = brain.init_params(seed=seed, gain_init=gain_init)
+    if warm_start:
+        theta = warm_start_readout(brain, theta, seed=seed)
+        fm, sm, sx = evaluate(brain, theta, 40, board, 3 * max_ticks,
+                              seed=99, max_idle=200)
+        print(f"warm-start readout: eval score mean {sm:.2f}  max {sx:.0f}",
+              flush=True)
     d = theta.size
+
+    # Per-block perturbation scale. The warm-started readout weights are large
+    # and sensitive -- a full-size perturbation there collapses the policy to
+    # constant-action and the gradient turns to noise. So perturb the readout
+    # gently and let ES mostly work the biophysical knobs (gain/tau/bias), which
+    # is the more faithful thing to be tuning anyway.
+    pscale = np.ones(d)
+    if warm_start:
+        pscale[brain._t:] = readout_sigma_frac
 
     # Adam on the ES gradient estimate
     m = np.zeros(d)
@@ -151,7 +215,7 @@ def es_train(brain, *, generations=150, pop=64, sigma=0.06, lr=0.03,
     history = []
     t0 = time.time()
     for gen in range(1, generations + 1):
-        E = rng.normal(size=(pop, d))                 # antithetic perturbations
+        E = rng.normal(size=(pop, d)) * pscale        # antithetic perturbations
         board_seed = int(rng.integers(1 << 30))       # CRN: shared this gen
         thetas = np.concatenate([theta + sigma * E, theta - sigma * E], axis=0)
         fit_grid, _ = rollout_pop(brain, thetas, n_envs, board, max_ticks,
@@ -221,6 +285,11 @@ if __name__ == "__main__":
                     help="synthetic only; smaller = faster milestone")
     ap.add_argument("--gain-init", type=float, default=None)
     ap.add_argument("--inner-steps", type=int, default=None)
+    ap.add_argument("--no-warm-start", action="store_true",
+                    help="skip the food-bearing readout initialisation")
+    ap.add_argument("--readout-sigma-frac", type=float, default=0.25,
+                    help="perturbation scale for the readout block vs the "
+                         "biophysical params; 0 = freeze the warm-started readout")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
@@ -244,4 +313,5 @@ if __name__ == "__main__":
     es_train(brain, generations=a.generations, pop=a.pop, sigma=a.sigma,
              lr=a.lr, n_envs=a.n_envs, board=a.board, max_ticks=a.max_ticks,
              max_idle=a.max_idle, shaping=a.shaping, gain_init=gain_init,
-             seed=a.seed, out=a.out)
+             warm_start=not a.no_warm_start,
+             readout_sigma_frac=a.readout_sigma_frac, seed=a.seed, out=a.out)

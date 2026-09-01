@@ -361,7 +361,7 @@ def play(mode="human", seed=None, headless=False, episodes=1, fps=12,
 
         status = f"score {env.score}  len {len(env.body)}"
         if not env.alive:
-            status += "  DEAD - R"
+            status += "  DEAD - R to revive"
         elif paused:
             status += "  PAUSED"
         status_surf = big.render(status, True, COLORS["text"])
