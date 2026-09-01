@@ -50,16 +50,24 @@ def rollout_pop(brain, thetas, n_envs, board, max_ticks, seed,
                 obs_mode="feature", max_idle=200, shaping=0.0):
     """Episodes for a whole population at once. thetas (C, n_params).
 
-    Returns (fitness, scores), each (C, n_envs). score = food eaten (the honest
-    metric, always). fitness = summed env reward, plus -- if `shaping` > 0 --
-    a potential-based bonus `shaping * (dist_before - dist_after)` for closing
-    Manhattan distance to the food.
+    Returns (fitness, scores), each (C, n_envs). score = food eaten, ALWAYS the
+    honest metric.
 
-    Why shaping: with the raw +10-per-food / -0.01-per-step reward, a policy that
-    never reaches food gets no gradient, and ES parks on the local optimum
-    "circle until idle-death" (fitness ~ -5.5). The distance term is dense, and
-    being potential-based it does not change which policy is optimal -- it just
-    makes the road there visible. Training only; eval passes shaping=0.
+    fitness depends on `shaping`:
+      shaping == 0  -> raw summed env reward (used for eval).
+      shaping  > 0  -> a TRAINING reward built to make food-seeking the thing
+                       that separates candidates:
+                          +10  per food
+                          + shaping * (dist_before - dist_after) toward food
+                          -0.03 per step (so endless circling costs real fitness)
+                       NO death penalty. Dying early is punished implicitly --
+                       fewer steps means fewer chances at the +food and the
+                       distance bonus. A -10 death spike, by contrast, makes
+                       "approach the food then die" score worse than "circle
+                       forever", which is the trap the earlier rewards fell in.
+                       Potential-based: the distance term telescopes to
+                       shaping*(d_start - d_end), so oscillating next to the
+                       food nets zero.
 
     Every candidate sees the SAME n_envs boards (seed independent of candidate):
     common random numbers, on top of antithetic sampling.
@@ -89,13 +97,17 @@ def rollout_pop(brain, thetas, n_envs, board, max_ticks, seed,
                     continue
                 e = row[i]
                 grew = e.score
-                o, r, d = e.step(int(acts[c, i]))
+                o, r_env, d = e.step(int(acts[c, i]))
                 obs[c, i] = o
-                if shaping and not d:
+                ate = e.score > grew
+                if shaping:
                     nd = _food_dist(e)
-                    if e.score == grew:            # no food this tick
+                    r = 10.0 * ate - 0.03
+                    if not d and not ate:
                         r += shaping * (prev_d[c, i] - nd)
                     prev_d[c, i] = nd
+                else:
+                    r = r_env
                 fitness[c, i] += r
                 done[c, i] = d
         if done.all():
@@ -105,8 +117,10 @@ def rollout_pop(brain, thetas, n_envs, board, max_ticks, seed,
     return fitness, scores
 
 
-def evaluate(brain, theta, n_envs, board, max_ticks, seed):
-    fit, sc = rollout_pop(brain, theta[None, :], n_envs, board, max_ticks, seed)
+def evaluate(brain, theta, n_envs, board, max_ticks, seed, max_idle=200):
+    """Honest score: raw reward (shaping=0), on whatever board is passed."""
+    fit, sc = rollout_pop(brain, theta[None, :], n_envs, board, max_ticks, seed,
+                          max_idle=max_idle)
     return fit.mean(), sc.mean(), sc.max()
 
 
@@ -123,7 +137,7 @@ def rank_normalise(x):
 # -------------------------------------------------------------------------- ES
 
 def es_train(brain, *, generations=150, pop=64, sigma=0.06, lr=0.03,
-             n_envs=8, board=12, max_ticks=350, max_idle=90, shaping=0.1,
+             n_envs=8, board=12, max_ticks=350, max_idle=90, shaping=0.3,
              gain_init=2.0, seed=0, eval_every=10, out=None):
     rng = np.random.default_rng(seed)
     theta = brain.init_params(seed=seed, gain_init=gain_init)
@@ -157,7 +171,8 @@ def es_train(brain, *, generations=150, pop=64, sigma=0.06, lr=0.03,
         row = {"gen": gen, "fit_mean": fit.mean(), "fit_best": fit.max(),
                "sec": time.time() - t0}
         if gen % eval_every == 0 or gen == 1:
-            fm, sm, sx = evaluate(brain, theta, 40, 20, 900, seed=99)
+            fm, sm, sx = evaluate(brain, theta, 40, board, 3 * max_ticks,
+                                  seed=99, max_idle=200)
             row.update(eval_fit=fm, eval_score_mean=sm, eval_score_max=sx)
             print(f"gen {gen:4d}  {row['sec']:6.0f}s  pop fit {fit.mean():+.2f}"
                   f"  |  eval score mean {sm:5.2f}  max {sx:3.0f}", flush=True)
@@ -200,7 +215,7 @@ if __name__ == "__main__":
     ap.add_argument("--board", type=int, default=10)
     ap.add_argument("--max-ticks", type=int, default=220)
     ap.add_argument("--max-idle", type=int, default=90)
-    ap.add_argument("--shaping", type=float, default=0.1,
+    ap.add_argument("--shaping", type=float, default=0.3,
                     help="potential-based food-distance bonus; 0 = raw reward")
     ap.add_argument("--neurons", type=int, default=6000,
                     help="synthetic only; smaller = faster milestone")

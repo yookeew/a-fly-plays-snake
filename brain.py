@@ -282,6 +282,60 @@ def load_flywire(n_obs, data_dir="data", min_syn=5, hops=2, full=False,
     return Connectome(W=W, type_id=type_id, ports=ports, out_idx=out_idx)
 
 
+# ------------------------------------------------------- control arm 2: rewire
+
+def rewire_degree_preserving(cx, n_swaps_per_edge=10, seed=0):
+    """Step 5, arm 2: scramble the topology, keep everything else.
+
+    Directed double-edge swap: pick edges a->b and c->d, replace with a->d and
+    c->b. Every node keeps its exact in-degree and out-degree, and each weight
+    stays attached to its original PRESYNAPTIC node -- so the per-neuron sign
+    (Dale) and the pre-normalisation weight multiset are untouched. Only *who
+    wires to whom* changes. `normalise_incoming` then runs exactly as it does
+    for the real connectome, so post-normalisation magnitudes differ (different
+    in-edges per row) -- that rescaling is applied identically to both arms.
+
+    This is the control that answers "did the fly's wiring do something, or would
+    any sparse graph with these degrees and weights do as well?". `make_synthetic`
+    (arm 3) is the looser null that does not even match the degree sequence.
+
+    Ports, readout, type_id, node identity: all unchanged.
+    """
+    rng = np.random.default_rng(seed)
+    W = cx.W.tocoo()
+    post = W.row.copy()          # b: presynaptic sign lives with `pre`, so we
+    pre = W.col.copy()           #    only ever shuffle the `post` endpoints
+    data = W.data.copy()
+    m = len(data)
+
+    existing = set(zip(pre.tolist(), post.tolist()))
+    target = n_swaps_per_edge * m
+    done = 0
+    attempts = 0
+    while done < target and attempts < target * 20:
+        attempts += 1
+        e1, e2 = rng.integers(0, m), rng.integers(0, m)
+        if e1 == e2:
+            continue
+        a, b = pre[e1], post[e1]
+        c, d = pre[e2], post[e2]
+        if a == d or c == b:                       # would make a self-loop
+            continue
+        if (a, d) in existing or (c, b) in existing:
+            continue
+        existing.discard((a, b))
+        existing.discard((c, d))
+        existing.add((a, d))
+        existing.add((c, b))
+        post[e1], post[e2] = d, b
+        done += 1
+
+    W2 = sp.coo_matrix((data, (post, pre)), shape=W.shape).tocsr()
+    W2 = normalise_incoming(W2)
+    return Connectome(W=W2, type_id=cx.type_id, ports=cx.ports,
+                      out_idx=cx.out_idx)
+
+
 # --------------------------------------------------------------------- smoke test
 
 if __name__ == "__main__":
