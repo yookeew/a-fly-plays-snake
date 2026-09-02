@@ -38,6 +38,8 @@ from snake import SnakeEnv, FEATURE_NAMES, greedy_bot
 
 FOOD_SIN = FEATURE_NAMES.index("food_sin")
 FOOD_COS = FEATURE_NAMES.index("food_cos")
+DANGER = {d: FEATURE_NAMES.index(f"danger_{d}")
+          for d in ("L", "F", "R", "L2", "F2", "R2")}
 
 
 # --------------------------------------------------------------------- rollout
@@ -168,6 +170,61 @@ def warm_start_readout(brain, theta, k=4.0, n_batches=60, seed=0):
     W[2] = k * A[:, 0]     # turn-right  <- food on the right
     W[1] = k * A[:, 1]     # straight    <- food ahead
     theta[t:t + N_ACT * brain.n_out] = W.ravel()
+    theta[t + N_ACT * brain.n_out:] = 0.0
+    return theta
+
+
+def warm_start_clone(brain, theta, k=6.0, n_batches=120, ridge=1e-2,
+                     w_food=2.5, w_danger=1.5, w_far=0.5, seed=0):
+    """Wire the readout to greedy_bot's decision rule, using regressed feature
+    projections. The food-only warm start ignores the danger_* channels and so
+    drives into its own tail; this one adds obstacle avoidance.
+
+    Two parts, neither of which touches the connectome:
+
+      1. Probe the frozen brain with random observations where BOTH the food
+         bearing and all six danger_* channels are swept, and ridge-regress the
+         descending activity onto those eight channels -> A (n_out x 8).
+      2. Wire the three action logits to greedy_bot's actual logic -- go toward
+         the food, minus the danger in that direction:
+
+           left     =  -w_food*food_sin_proj - w_danger*dL_proj - w_far*dL2_proj
+           straight =  +w_food*food_cos_proj - w_danger*dF_proj - w_far*dF2_proj
+           right    =  +w_food*food_sin_proj - w_danger*dR_proj - w_far*dR2_proj
+
+    Still an ES-free score of how cleanly each graph's wiring carries those
+    features to the descending neurons; identical procedure on every step-5 arm.
+    """
+    rng = np.random.default_rng(seed)
+    params = brain.unpack_pop(theta[None, :])
+    B = 64
+    h = brain.initial_state_pop(1, B)
+    chans = [FOOD_SIN, FOOD_COS, DANGER["L"], DANGER["F"], DANGER["R"],
+             DANGER["L2"], DANGER["F2"], DANGER["R2"]]
+    R, Y = [], []
+    for _ in range(n_batches):
+        obs = rng.normal(0, 1, (1, B, brain.cx.n_obs)).astype(brain.dtype)
+        ang = rng.uniform(-np.pi, np.pi, B)
+        col = np.zeros((B, 8))
+        col[:, 0], col[:, 1] = np.sin(ang), np.cos(ang)
+        col[:, 2:] = rng.integers(0, 2, (B, 6))        # danger is 0/1 in the game
+        obs[0, :, chans] = col.T.astype(brain.dtype)
+        h, _ = brain.step_pop(h, obs, params)
+        r = np.clip(h[:, 0, :], 0.0, brain.r_max)[brain.out_idx]
+        R.append((r - r.mean(axis=0, keepdims=True)).T)
+        Y.append(col)
+    R = np.concatenate(R)
+    Y = np.concatenate(Y)
+    A = np.linalg.solve(R.T @ R + ridge * np.eye(R.shape[1]), R.T @ Y)  # (n_out, 8)
+    fs, fc, dL, dF, dR, dL2, dF2, dR2 = A.T
+
+    theta = theta.copy()
+    t = brain._t
+    W = np.zeros((N_ACT, brain.n_out))
+    W[0] = w_food * (-fs) - w_danger * dL - w_far * dL2   # turn left
+    W[1] = w_food * fc - w_danger * dF - w_far * dF2      # straight
+    W[2] = w_food * fs - w_danger * dR - w_far * dR2      # turn right
+    theta[t:t + N_ACT * brain.n_out] = (k * W).ravel()
     theta[t + N_ACT * brain.n_out:] = 0.0
     return theta
 

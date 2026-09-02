@@ -80,15 +80,17 @@ class SnakeEnv:
         self.steps = 0
         self.idle = 0
         self.alive = True
+        self.death = None                  # 'wall' | 'body' | 'starved' | 'solved'
         self._place_food()
         return self.observe()
 
     def _place_food(self):
         free = [(x, y) for x in range(self.W) for y in range(self.H)
                 if (x, y) not in self.occupied]
-        if not free:                       # board solved
+        if not free:                       # board solved -- a win, not a death
             self.food = None
             self.alive = False
+            self.death = "solved"
             return
         self.food = free[int(self.rng.integers(0, len(free)))]
 
@@ -184,6 +186,10 @@ class SnakeEnv:
         deadly = self._is_deadly(head) and not (head == tail and not growing)
         if deadly:
             self.alive = False
+            hx, hy = head
+            in_bounds = 0 <= hx < self.W and 0 <= hy < self.H
+            # wrap means no walls, so any wrapped death is a body hit
+            self.death = "body" if (self.wrap or in_bounds) else "wall"
             return self.observe(), reward - 10.0, True
 
         self.body.appendleft(head)
@@ -201,6 +207,7 @@ class SnakeEnv:
         self.steps += 1
         if self.idle >= self.max_idle:       # went too long without eating
             self.alive = False
+            self.death = "starved"
             return self.observe(), reward - 5.0, True
         return self.observe(), reward, not self.alive
 
@@ -250,7 +257,7 @@ def play(mode="human", seed=None, headless=False, episodes=1, fps=12,
     act = policy if policy is not None else greedy_bot
 
     if headless:
-        scores = []
+        scores, deaths = [], []
         for ep in range(episodes):
             env = SnakeEnv(width, height, wrap, obs, retina,
                            seed=None if seed is None else seed + ep)
@@ -260,8 +267,12 @@ def play(mode="human", seed=None, headless=False, episodes=1, fps=12,
             while not done:
                 _, _, done = env.step(act(env))
             scores.append(env.score)
-            print(f"episode {ep:3d}  score {env.score:3d}  steps {env.steps}")
-        print(f"\nmean {np.mean(scores):.2f}  max {max(scores)}  min {min(scores)}")
+            deaths.append(env.death)
+            print(f"episode {ep:3d}  score {env.score:3d}  steps {env.steps:4d}"
+                  f"  died: {env.death}")
+        tally = {c: deaths.count(c) for c in sorted(set(deaths), key=str)}
+        print(f"\nmean {np.mean(scores):.2f}  max {max(scores)}  "
+              f"min {min(scores)}   deaths {tally}")
         return scores
 
     import pygame
@@ -370,7 +381,9 @@ def play(mode="human", seed=None, headless=False, episodes=1, fps=12,
 
         status = f"score {env.score}  len {len(env.body)}"
         if not env.alive:
-            status += "  DEAD - R to revive"
+            cause = {"wall": "hit the wall", "body": "hit its body",
+                     "starved": "starved", "solved": "SOLVED THE BOARD"}
+            status += f"  {cause.get(env.death, 'DEAD')} - R to revive"
         elif paused:
             status += "  PAUSED"
         status_surf = big.render(status, True, COLORS["text"])

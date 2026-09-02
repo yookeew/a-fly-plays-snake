@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from brain import load_flywire
 from model import Brain
-from train import warm_start_readout, evaluate
+from train import warm_start_clone, evaluate
 from snake import FEATURE_NAMES
 
 N_OBS = len(FEATURE_NAMES)
@@ -29,7 +29,7 @@ for s in range(5):
     for gain in GAIN_GRID:
         runs = []
         for ws in (0, 1):
-            theta = warm_start_readout(
+            theta = warm_start_clone(
                 brain, brain.init_params(seed=0, gain_init=gain), seed=ws)
             _, m, mx = evaluate(brain, theta, EPISODES, BOARD,
                                 3 * BOARD * BOARD, seed=99)

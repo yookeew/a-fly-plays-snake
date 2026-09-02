@@ -12,9 +12,11 @@ wiring". Three arms:
                    real subgraph's n / mean-degree / readout / E-I ratio.
 
 No ES here (see the project notes -- the warm-start policy is a spike ES cannot
-climb). Each graph is scored by how well a READOUT REGRESSED ONTO THE FOOD
-BEARING plays Snake -- the one thing topology can affect here: how cleanly the
-sensory signal reaches the descending neurons.
+climb). Each graph is scored by how well a READOUT WIRED TO GREEDY_BOT'S RULE
+plays Snake -- descending activity regressed onto the food bearing AND the six
+danger_* channels, then combined as "toward food, minus danger that way"
+(train.warm_start_clone). The one thing topology can affect here: how cleanly
+those sensory features reach the descending neurons.
 
 gain_init is ours to set (a "put the dynamics in range" knob, not the fly's), so
 each arm is swept over a small gain grid and reported at its OWN best -- every
@@ -31,7 +33,7 @@ import numpy as np
 
 from brain import make_synthetic, load_flywire, rewire_degree_preserving
 from model import Brain
-from train import warm_start_readout, evaluate, random_baseline
+from train import warm_start_clone, evaluate, random_baseline
 from snake import FEATURE_NAMES, SnakeEnv, greedy_bot
 
 N_OBS = len(FEATURE_NAMES)
@@ -43,7 +45,7 @@ INNER = 8
 
 
 def score_once(brain, gain, ws):
-    theta = warm_start_readout(
+    theta = warm_start_clone(
         brain, brain.init_params(seed=0, gain_init=gain), seed=ws)
     _, mean_sc, max_sc = evaluate(brain, theta, EPISODES, BOARD,
                                   3 * BOARD * BOARD, seed=99)

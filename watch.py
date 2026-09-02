@@ -1,10 +1,12 @@
 """
 Watch a connectome-driven brain play Snake, in the same window the human uses.
 
-No training involved -- the readout is warm-started (regressed onto the food
-bearing, see train.warm_start_readout) and the connectome is frozen. This is the
-step-5 policy, the one that scores ~3 food on the real graph and ~5 on the
-controls. It is not good. That is the finding.
+No training involved -- the connectome is frozen and the readout is warm-started
+(`--warm clone`, the default: descending activity regressed onto the food
+bearing + the six danger_* channels, wired to greedy_bot's rule; `--warm food`
+is the older food-only version that ignores danger and drives into its tail).
+This is the step-5 policy. It is not good -- ~5 food vs greedy's ~19. That is
+the finding.
 
     python watch.py                       # real FlyWire subgraph
     python watch.py --graph synthetic      # density-matched random graph
@@ -21,7 +23,7 @@ import numpy as np
 
 from brain import make_synthetic, load_flywire, rewire_degree_preserving
 from model import Brain
-from train import warm_start_readout
+from train import warm_start_readout, warm_start_clone
 from snake import play, FEATURE_NAMES
 
 
@@ -46,7 +48,7 @@ class BrainPolicy:
         return int(a[0, 0])
 
 
-def build(graph, seed, gain, inner):
+def build(graph, seed, gain, inner, warm="clone"):
     n_obs = len(FEATURE_NAMES)
     if graph == "synthetic":
         real = load_flywire(n_obs=n_obs, seed=seed)     # match its size
@@ -61,9 +63,11 @@ def build(graph, seed, gain, inner):
         cx = load_flywire(n_obs=n_obs, seed=seed)
 
     brain = Brain(cx, inner_steps=inner)
-    theta = warm_start_readout(brain, brain.init_params(seed=0, gain_init=gain),
-                               seed=0)
-    print(f"{graph}: n={cx.n}, readout={len(cx.out_idx)}, gain_init={gain}")
+    theta0 = brain.init_params(seed=0, gain_init=gain)
+    ws = warm_start_clone if warm == "clone" else warm_start_readout
+    theta = ws(brain, theta0, seed=0)
+    print(f"{graph}: n={cx.n}, readout={len(cx.out_idx)}, gain_init={gain}, "
+          f"warm-start={warm}")
     return brain, BrainPolicy(brain, theta)
 
 
@@ -72,6 +76,8 @@ if __name__ == "__main__":
     ap.add_argument("--graph", default="real",
                     choices=["real", "rewire", "synthetic"])
     ap.add_argument("--seed", type=int, default=0, help="port / readout draw")
+    ap.add_argument("--warm", default="clone", choices=["clone", "food"],
+                    help="clone = imitate greedy_bot; food = food-bearing only")
     ap.add_argument("--gain", type=float, default=2.0)
     ap.add_argument("--inner-steps", type=int, default=8)
     ap.add_argument("--board", type=int, default=12)
@@ -80,6 +86,6 @@ if __name__ == "__main__":
     ap.add_argument("--episodes", type=int, default=1)
     a = ap.parse_args()
 
-    _, pol = build(a.graph, a.seed, a.gain, a.inner_steps)
+    _, pol = build(a.graph, a.seed, a.gain, a.inner_steps, warm=a.warm)
     play(mode="brain", headless=a.headless, episodes=a.episodes, fps=a.fps,
          width=a.board, height=a.board, policy=pol)
