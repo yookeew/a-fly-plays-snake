@@ -72,7 +72,11 @@ class Brain:
         # Then I = (P @ obs) broadcasts each observation channel onto its slab.
         rows = np.concatenate([np.asarray(p) for p in cx.ports])
         cols = np.concatenate([np.full(len(p), c) for c, p in enumerate(cx.ports)])
-        self.P = sp.csr_matrix((np.ones(len(rows)), (rows, cols)),
+        if getattr(cx, "port_signs", None) is not None:
+            vals = np.concatenate([np.asarray(s, float) for s in cx.port_signs])
+        else:
+            vals = np.ones(len(rows))
+        self.P = sp.csr_matrix((vals, (rows, cols)),
                                shape=(self.n, cx.n_obs))
 
         self._t = 3 * self.n_types

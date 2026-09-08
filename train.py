@@ -122,10 +122,11 @@ def rollout_pop(brain, thetas, n_envs, board, max_ticks, seed,
     return fitness, scores
 
 
-def evaluate(brain, theta, n_envs, board, max_ticks, seed, max_idle=200):
+def evaluate(brain, theta, n_envs, board, max_ticks, seed, max_idle=200,
+             obs_mode="feature"):
     """Honest score: raw reward (shaping=0), on whatever board is passed."""
     fit, sc = rollout_pop(brain, theta[None, :], n_envs, board, max_ticks, seed,
-                          max_idle=max_idle)
+                          obs_mode=obs_mode, max_idle=max_idle)
     return fit.mean(), sc.mean(), sc.max()
 
 
@@ -224,6 +225,68 @@ def warm_start_clone(brain, theta, k=6.0, n_batches=120, ridge=1e-2,
     W[0] = w_food * (-fs) - w_danger * dL - w_far * dL2   # turn left
     W[1] = w_food * fc - w_danger * dF - w_far * dF2      # straight
     W[2] = w_food * fs - w_danger * dR - w_far * dR2      # turn right
+    theta[t:t + N_ACT * brain.n_out] = (k * W).ravel()
+    theta[t + N_ACT * brain.n_out:] = 0.0
+    return theta
+
+
+def _env_targets(env):
+    """The five features greedy_bot effectively uses, read straight from env
+    state: food bearing (sin, cos) in the heading frame, and one-step danger
+    to the left / ahead / right."""
+    from snake import ACTION_TURN
+    hx, hy = env.body[0]
+    if env.food is None:
+        bs, bc = 0.0, 1.0
+    else:
+        dx, dy = env.food[0] - hx, env.food[1] - hy
+        ang = env.dir * (np.pi / 2)
+        ca, sa = np.cos(-ang), np.sin(-ang)
+        fx, fy = dx * ca - dy * sa, dx * sa + dy * ca
+        rr = np.hypot(fx, fy)
+        bs, bc = (fy / rr, fx / rr) if rr > 0 else (0.0, 1.0)
+    dngr = [float(env._is_deadly(env._ahead(ACTION_TURN[a], 1)))
+            for a in (0, 1, 2)]
+    return [bs, bc, *dngr]
+
+
+def warm_start_rollout(brain, theta, obs_mode="feature", n_episodes=60,
+                       boards=(10, 12, 15), ridge=1e-2, k=6.0,
+                       w_food=2.5, w_danger=1.5, seed=0):
+    """Obs-mode-agnostic warm start. Roll out greedy_bot; feed each observation
+    (`feature` OR `retina`) to the frozen brain; regress descending activity
+    onto the five decision features taken from env state; wire the logits to
+    greedy_bot's rule. Same idea as warm_start_clone, but works with
+    retinotopic ports where there is no food-bearing channel to sweep.
+    """
+    params = brain.unpack_pop(theta[None, :])
+    R, Y = [], []
+    ep = 0
+    for board in boards:
+        for _ in range(max(1, n_episodes // len(boards))):
+            env = SnakeEnv(board, board, obs=obs_mode, seed=seed + ep)
+            obs = env.reset()
+            ep += 1
+            h = brain.initial_state_pop(1, 1)
+            for _ in range(3 * board * board):
+                Y.append(_env_targets(env))
+                o = obs.reshape(1, 1, -1).astype(brain.dtype)
+                h, _ = brain.step_pop(h, o, params)
+                r = np.clip(h[:, 0, :], 0.0, brain.r_max)[brain.out_idx]
+                R.append((r[:, 0] - r[:, 0].mean()).copy())
+                obs, _, done = env.step(int(greedy_bot(env)))
+                if done:
+                    break
+    R, Y = np.array(R), np.array(Y)
+    A = np.linalg.solve(R.T @ R + ridge * np.eye(R.shape[1]), R.T @ Y)  # (n_out,5)
+    fs, fc, dL, dF, dR = A.T
+
+    theta = theta.copy()
+    t = brain._t
+    W = np.zeros((N_ACT, brain.n_out))
+    W[0] = -w_food * fs - w_danger * dL       # turn left
+    W[1] = w_food * fc - w_danger * dF        # straight
+    W[2] = w_food * fs - w_danger * dR        # turn right
     theta[t:t + N_ACT * brain.n_out] = (k * W).ravel()
     theta[t + N_ACT * brain.n_out:] = 0.0
     return theta

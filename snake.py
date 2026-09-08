@@ -26,6 +26,10 @@ Run it:
 
 Controls: arrows or WASD to steer, A/D also work as turn-left/turn-right,
 R restarts, ESC quits, SPACE pauses.
+
+used:
+.venv/Scripts/python.exe watch.py 
+python snake.py --mode human
 """
 
 import argparse
@@ -238,6 +242,29 @@ def greedy_bot(env):
         if score > best_score:
             best, best_score = a, score
     return best
+
+
+def lethal_actions(env):
+    """Boolean length-3 mask: does action a (0/1/2 = left/straight/right) kill
+    the snake THIS tick, judged on the true board state?
+
+    This is exactly the veto inside greedy_bot, pulled out so a learned policy
+    can mask its own logits with it -- a brainstem collision reflex sitting
+    downstream of the readout. The connectome carries the danger_* channels too
+    weakly and a tick too late for the RNN to dodge its own body reliably (the
+    readout has state, so a turn tends to continue into a spiral); until danger
+    is wired into the logits properly this backstops it.
+
+    Respects the tail-vacate rule: stepping onto the retreating tail cell is
+    safe, unless that same move eats and the tail therefore stays put.
+    """
+    tail, food = env.body[-1], env.food
+    mask = np.zeros(3, dtype=bool)
+    for a in (LEFT, STRAIGHT, RIGHT):
+        cell = env._ahead(ACTION_TURN[a], 1)
+        if env._is_deadly(cell) and not (cell == tail and cell != food):
+            mask[a] = True
+    return mask
 
 
 # ----------------------------------------------------------------------- render

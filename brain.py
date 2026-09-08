@@ -15,6 +15,7 @@ Convention, everywhere: `W[i, j]` is the weight FROM j INTO i. So row i is
 everything feeding neuron i, and `W @ r` is the input each neuron receives.
 """
 
+import re
 from dataclasses import dataclass
 
 import numpy as np
@@ -27,6 +28,13 @@ import scipy.sparse as sp
 NT_SIGN = {"ACH": +1.0, "GABA": -1.0, "GLUT": -1.0,
            "DA": 0.0, "SER": 0.0, "OCT": 0.0}
 
+# Descending neurons associated with walking steering / turning, from the
+# locomotor-DN literature (Rayshubskiy 2020, Feng 2020, Braun 2024). Used by
+# load_flywire(readout="steer") to aim the readout at the fly's actual turn
+# command neurons instead of 64 arbitrary descendings.
+STEER_DN = ("DNa01", "DNa02", "DNa03", "DNa04", "DNa08", "DNa10",
+            "DNb01", "DNb02", "DNg13", "DNg14", "DNg16")
+
 
 @dataclass
 class Connectome:
@@ -38,15 +46,26 @@ class Connectome:
     ports    list of length n_obs. ports[c] is an int array of neuron indices
              that observation channel c injects current into. Order is
              load-bearing: it must match FEATURE_NAMES / the raveled retina.
+    port_signs  list of length n_obs or None. port_signs[c] is a float array,
+             same shape as ports[c], giving the injection weight per neuron
+             (+1 / -1). Lets one channel drive a population push-pull -- e.g.
+             food bearing into right-eye target detectors as +1 and left-eye
+             as -1. None means every injection is +1 (the common case).
     out_idx  (n_out,) int. The readout population -- descending neurons for the
              real connectome. The linear map off these to 3 logits is a TRAINED
              parameter, so it does not live here.
+    out_side (n_out,) int in {-1, 0, +1} or None. Body side of each readout
+             neuron (left / centre / right), so a warm start can exploit the
+             fly's left-right steering asymmetry. None for graphs without a
+             meaningful side (synthetic, rewire keeps the real one).
     """
 
     W: sp.csr_matrix
     type_id: np.ndarray
     ports: list
     out_idx: np.ndarray
+    out_side: np.ndarray = None
+    port_signs: list = None
 
     @property
     def n(self):
@@ -196,8 +215,64 @@ def _reach(W, seeds, hops, backward=False):
 
 # ----------------------------------------------------------------- flywire arm
 
+def _retina_ports(cls, root_ids, n_obs, data_dir, n_types=3):
+    """Map a C x K x K egocentric retina patch onto real medulla columns.
+
+    Raveled obs index is c*K*K + j*K + i (channel, forward row j, lateral col i),
+    matching snake.SnakeEnv._observe_retina, which ravels a (3, K, K) array.
+    Each pixel gets its nearest medulla column; each channel gets a different
+    column-tiled cell type. Retinotopically adjacent pixels -> retinotopically
+    adjacent neurons, which is the whole point of doing this.
+    """
+    import pandas as pd
+
+    C = 3
+    K = int(round((n_obs / C) ** 0.5))
+    if C * K * K != n_obs:
+        raise ValueError(f"retina ports need n_obs = 3*K*K; got {n_obs}")
+
+    col = pd.read_csv(f"{data_dir}/column_assignment.csv.gz")
+    # one eye only -- a retinotopic map should not mix the two medullae. The
+    # right eye is arbitrary; the left is its mirror.
+    col = col[(col["hemisphere"] == "right")
+              & col["root_id"].isin(set(root_ids))]
+    pos = pd.Series(np.arange(len(root_ids)), index=root_ids)
+
+    cxy = col.groupby("column_id")[["x", "y"]].mean()
+    cids = cxy.index.to_numpy()
+    cpts = cxy.to_numpy()                                    # (n_col, 2)
+    order_by_dist = None
+
+    top_types = col["type"].value_counts().index[:n_types].tolist()
+    by_type = {t: col[col["type"] == t].groupby("column_id")["root_id"]
+               .apply(list).to_dict() for t in top_types}
+
+    # K x K target grid over the central 60% of the column sheet
+    span = 0.6 * (cpts.max(0) - cpts.min(0))
+    ctr = cpts.mean(0)
+    gx = np.linspace(ctr[0] - span[0] / 2, ctr[0] + span[0] / 2, K)   # lateral i
+    gy = np.linspace(ctr[1] + span[1] / 2, ctr[1] - span[1] / 2, K)   # forward j
+
+    ports = []
+    for c in range(C):
+        table = by_type[top_types[c]]
+        for j in range(K):
+            for i in range(K):
+                d2 = (cpts[:, 0] - gx[i]) ** 2 + (cpts[:, 1] - gy[j]) ** 2
+                order_by_dist = np.argsort(d2)
+                rids = []
+                for k in order_by_dist[:8]:            # nearest col with a cell
+                    rids = table.get(cids[k], [])
+                    if rids:
+                        break
+                idx = pos.reindex(rids).dropna().to_numpy().astype(np.int32)
+                ports.append(idx)
+    return ports
+
+
 def load_flywire(n_obs, data_dir="data", min_syn=5, hops=2, full=False,
-                 n_port_neurons=200, n_readout=64, seed=0):
+                 n_port_neurons=200, n_readout=64, ports="random",
+                 readout="random", retina_types=3, seed=0):
     """The real connectome, behind the same `Connectome` interface.
 
     Schema is Codex's FlyWire export as of 2026-08 (see explore/schema_notes.md).
@@ -209,6 +284,26 @@ def load_flywire(n_obs, data_dir="data", min_syn=5, hops=2, full=False,
       hops     v1 subgraph: keep only neurons that sit on a port -> readout path
                within this many hops each way (plus the ports and readout
                themselves). `full=True` keeps all ~139k.
+      ports    "random" -- n_port_neurons arbitrary sensory neurons, split into
+               one slab per observation channel.
+               "retina" -- map a K x K x C egocentric patch onto real medulla
+               columns via column_assignment.csv.gz (retinotopic). Requires
+               n_obs == C*K*K and the `retina` obs mode in the env.
+               "visual" -- `feature` obs only. Snake is visual pursuit, so
+               food_* -> small-target tracking LCs (LC10/11/15/18, lateralised
+               push-pull on food_sin), danger_* -> looming detectors
+               (LPLC2/LC4/LC6, by side), fullness -> random central. The
+               functional/random hybrid.
+               "functional" -- `feature` obs only. Route each channel to the
+               fly population that senses that kind of thing: food_* -> olfactory
+               receptor neurons, danger_* -> looming-detector visual projection
+               neurons (LPLC/LC), the rest -> central neurons. (This one loses:
+               olfaction is non-directional, so the food bearing arrives
+               scrambled -- see explore/step5_results.md.)
+      readout  "random"    -- n_readout arbitrary descending neurons.
+               "steer"     -- the curated turn-command DNs (STEER_DN), ~24.
+               "locomotor" -- all anterior/basal DNs (DNa#, DNb#), ~57.
+               "steer"/"locomotor" need consolidated_cell_types.csv.gz.
     """
     import pandas as pd
 
@@ -244,20 +339,101 @@ def load_flywire(n_obs, data_dir="data", min_syn=5, hops=2, full=False,
     key = cls["super_class"].fillna("NA") + "/" + cls["class"].fillna("NA")
     type_id = pd.factorize(key)[0].astype(np.int32)
 
-    # readout: descending neurons. There are 1305; a linear map off all of them
-    # is ~4k trained params and ES scales badly with dimension, so v1 samples a
-    # fixed n_readout of them. Biologically arbitrary, fine for a first pass.
-    desc = np.where((cls["super_class"] == "descending").to_numpy())[0]
     rng = np.random.default_rng(seed)
-    out_idx = np.sort(rng.permutation(desc)[:n_readout])
+    desc_mask = (cls["super_class"] == "descending").to_numpy()
+    side_of = cls["side"].map({"left": -1, "right": 1}).fillna(0).to_numpy()
 
-    # ports: v1 -- arbitrary sensory neurons, split into one slab per channel.
-    # Upgrade (step 3 note): map a retinotopic patch onto real medulla columns
-    # using column_assignment.csv.gz.
-    sens = np.where(cls["super_class"]
-                    .isin(["sensory", "sensory_ascending"]).to_numpy())[0]
-    sens = np.sort(rng.permutation(sens)[:max(n_obs, n_port_neurons)])
-    ports = [np.asarray(a, np.int32) for a in np.array_split(sens, n_obs)]
+    # -- readout population
+    if readout == "random":
+        # 1305 descendings; a full linear map is ~4k params and ES scales badly
+        # with dimension, so sample n_readout. Biologically arbitrary.
+        desc = np.where(desc_mask)[0]
+        out_idx = np.sort(rng.permutation(desc)[:n_readout])
+    else:
+        ptype = (pd.read_csv(f"{data_dir}/consolidated_cell_types.csv.gz")
+                 .set_index("root_id")["primary_type"].reindex(root_ids))
+        if readout == "steer":
+            pick = ptype.isin(STEER_DN).to_numpy()
+        elif readout == "locomotor":
+            pick = ptype.astype(str).str.match(r"DN[ab]\d").to_numpy()
+        else:
+            raise ValueError(f"readout={readout!r}")
+        out_idx = np.where(desc_mask & pick)[0]
+    out_side = side_of[out_idx].astype(np.int8)
+
+    # -- input ports
+    port_signs = None
+    if ports == "retina":
+        ports = _retina_ports(cls, root_ids, n_obs, data_dir, retina_types)
+    elif ports == "visual":
+        # Snake food-seeking is a VISUAL PURSUIT task, not chemotaxis -- so route
+        # the food bearing through the fly's small-target tracking channel
+        # (retinotopic lobula-columnar LC10/LC11/LC15/LC18, ~1200 cells, wired to
+        # steer the body toward a moving target) and the danger sensors through
+        # the looming detectors (LPLC2/LC4/LC6, the collision-avoidance channel).
+        # Everything with no visual home (fullness) falls back to random central
+        # neurons -- the "balance" between functional and arbitrary ports.
+        # food_sin is lateralised push-pull: +1 into right-eye detectors, -1 into
+        # left-eye, so "food on the right" is a signed population signal instead
+        # of an unsigned magnitude the readout has to disambiguate downstream.
+        from snake import FEATURE_NAMES
+        if n_obs != len(FEATURE_NAMES):
+            raise ValueError("visual ports are for `feature` obs only")
+        ptype = (pd.read_csv(f"{data_dir}/consolidated_cell_types.csv.gz")
+                 .set_index("root_id")["primary_type"].reindex(root_ids).fillna(""))
+        side = cls["side"].to_numpy()
+        is_target = ptype.str.fullmatch(r"LC10[a-f]|LC11|LC15|LC18").fillna(False).to_numpy()
+        is_loom = ptype.str.fullmatch(r"LPLC2|LC4|LC6").fillna(False).to_numpy()
+        is_central = (cls["super_class"] == "central").to_numpy()
+        tgt_L = rng.permutation(np.where(is_target & (side == "left"))[0])
+        tgt_R = rng.permutation(np.where(is_target & (side == "right"))[0])
+        loom_L = rng.permutation(np.where(is_loom & (side == "left"))[0])
+        loom_R = rng.permutation(np.where(is_loom & (side == "right"))[0])
+        loom_all = rng.permutation(np.where(is_loom)[0])
+        other = rng.permutation(np.where(is_central)[0])[:400]
+        # split the target pool into three disjoint slabs: sin / cos / near
+        tL3, tR3 = np.array_split(tgt_L, 3), np.array_split(tgt_R, 3)
+        idx, sgn = {}, {}
+        idx["food_sin"] = np.r_[tL3[0], tR3[0]].astype(np.int32)
+        sgn["food_sin"] = np.r_[-np.ones(len(tL3[0])), np.ones(len(tR3[0]))]
+        idx["food_cos"] = np.r_[tL3[1], tR3[1]].astype(np.int32)
+        idx["food_near"] = np.r_[tL3[2], tR3[2]].astype(np.int32)
+        lL2, lR2 = np.array_split(loom_L, 2), np.array_split(loom_R, 2)
+        idx["danger_L"], idx["danger_L2"] = lL2[0].astype(np.int32), lL2[1].astype(np.int32)
+        idx["danger_R"], idx["danger_R2"] = lR2[0].astype(np.int32), lR2[1].astype(np.int32)
+        fF = np.array_split(loom_all, 2)
+        idx["danger_F"], idx["danger_F2"] = fF[0].astype(np.int32), fF[1].astype(np.int32)
+        idx["fullness"] = other.astype(np.int32)
+        ports = [idx[name] for name in FEATURE_NAMES]
+        port_signs = [sgn.get(name, np.ones(len(idx[name]))) for name in FEATURE_NAMES]
+    elif ports == "functional":
+        from snake import FEATURE_NAMES
+        if n_obs != len(FEATURE_NAMES):
+            raise ValueError("functional ports are for `feature` obs only")
+        ptype = (pd.read_csv(f"{data_dir}/consolidated_cell_types.csv.gz")
+                 .set_index("root_id")["primary_type"].reindex(root_ids).fillna(""))
+        is_orn = ((cls["super_class"] == "sensory").to_numpy()
+                  & (cls["class"] == "olfactory").to_numpy())
+        is_loom = ptype.str.fullmatch(r"LPLC1|LPLC2|LC4|LC6|LC22").fillna(False).to_numpy()
+        is_central = (cls["super_class"] == "central").to_numpy()
+        smell = rng.permutation(np.where(is_orn)[0])
+        loom = rng.permutation(np.where(is_loom)[0])
+        other = rng.permutation(np.where(is_central)[0])[:400]
+        groups = {"food": [], "danger": [], "other": []}
+        for name in FEATURE_NAMES:
+            key = "food" if "food" in name else "danger" if "danger" in name else "other"
+            groups[key].append(name)
+        pick = {}
+        for key, pool in (("food", smell), ("danger", loom), ("other", other)):
+            for arr, nm in zip(np.array_split(pool, max(1, len(groups[key]))),
+                               groups[key]):
+                pick[nm] = np.asarray(arr, np.int32)
+        ports = [pick[name] for name in FEATURE_NAMES]
+    else:
+        sens = np.where(cls["super_class"]
+                        .isin(["sensory", "sensory_ascending"]).to_numpy())[0]
+        sens = np.sort(rng.permutation(sens)[:max(n_obs, n_port_neurons)])
+        ports = [np.asarray(a, np.int32) for a in np.array_split(sens, n_obs)]
 
     if not full:
         # keep the neurons that actually relay a port to the readout: forward
@@ -275,11 +451,16 @@ def load_flywire(n_obs, data_dir="data", min_syn=5, hops=2, full=False,
         remap[sub] = np.arange(sub.size)
         W = W[sub][:, sub]
         type_id = pd.factorize(type_id[sub])[0].astype(np.int32)  # recontiguous
-        out_idx = remap[out_idx][remap[out_idx] >= 0]
+        kept_out = remap[out_idx] >= 0
+        out_side = out_side[kept_out]
+        out_idx = remap[out_idx][kept_out]
+        if port_signs is not None:
+            port_signs = [s[remap[p] >= 0] for s, p in zip(port_signs, ports)]
         ports = [remap[p][remap[p] >= 0] for p in ports]
 
     W = normalise_incoming(W)
-    return Connectome(W=W, type_id=type_id, ports=ports, out_idx=out_idx)
+    return Connectome(W=W, type_id=type_id, ports=ports, out_idx=out_idx,
+                      out_side=out_side, port_signs=port_signs)
 
 
 # ------------------------------------------------------- control arm 2: rewire
@@ -333,7 +514,8 @@ def rewire_degree_preserving(cx, n_swaps_per_edge=10, seed=0):
     W2 = sp.coo_matrix((data, (post, pre)), shape=W.shape).tocsr()
     W2 = normalise_incoming(W2)
     return Connectome(W=W2, type_id=cx.type_id, ports=cx.ports,
-                      out_idx=cx.out_idx)
+                      out_idx=cx.out_idx, out_side=cx.out_side,
+                      port_signs=cx.port_signs)
 
 
 # --------------------------------------------------------------------- smoke test
