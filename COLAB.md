@@ -13,10 +13,10 @@ generation checkpoints to Drive, so a reclaimed session resumes.
 ## One-time setup
 
 1. Push the `es` branch: `git push origin es`.
-2. Upload `data/` to Drive: drag `connections_princeton.csv.gz`,
-   `classification.csv.gz`, `column_assignment.csv.gz`,
-   `consolidated_cell_types.csv.gz` into `MyDrive/flysnake/data/` in the Drive
-   web UI (~72 MB, a few minutes).
+2. Put the four CSVs — `connections_princeton.csv.gz`, `classification.csv.gz`,
+   `column_assignment.csv.gz`, `consolidated_cell_types.csv.gz` — somewhere
+   under `MyDrive/flybrain/` in the Drive web UI (~72 MB). Cell 1 finds them
+   whether they sit in the folder root or a `data/` subfolder.
 3. New Colab notebook, **Runtime → Change runtime type → T4 GPU**.
 
 ## Notebook cells
@@ -27,16 +27,27 @@ generation checkpoints to Drive, so a reclaimed session resumes.
 from google.colab import drive
 drive.mount('/content/drive')
 
+DRIVE = '/content/drive/MyDrive/flybrain'      # your Drive folder
+
 %cd /content
 !rm -rf flybrain
 !git clone https://github.com/yookeew/a-fly-plays-snake.git flybrain
 %cd flybrain
 !git checkout es
-!mkdir -p data && cp /content/drive/MyDrive/flysnake/data/* data/
-!mkdir -p /content/drive/MyDrive/flysnake/runs
+
+import glob, os, shutil
+os.makedirs('data', exist_ok=True)
+for s in set(glob.glob(f'{DRIVE}/**/*.csv.gz', recursive=True)):
+    shutil.copy(s, 'data/')
+os.makedirs(f'{DRIVE}/runs', exist_ok=True)
+print('data/:', sorted(os.listdir('data')))
+
 !nvidia-smi -L
 import torch; print("torch", torch.__version__, "cuda", torch.cuda.is_available())
 ```
+
+`data/` must list at least those four files. Empty → `DRIVE` is wrong or the
+upload didn't finish.
 
 ### Cell 2 — parity check (do this before trusting any run)
 
@@ -54,7 +65,7 @@ showed `full=True` gives no R² gain over a subgraph, so only bench it (`--full`
 if you're curious.
 
 ```python
-R = "/content/drive/MyDrive/flysnake/runs/_bench"
+R = "/content/drive/MyDrive/flybrain/runs/_bench"
 !python es_colab.py --arm real --obs retina --hops 3 --generations 2 --pop 48 --n-envs 6 --board 12 --out {R}
 !python es_colab.py --arm real --obs retina --hops 4 --generations 2 --pop 48 --n-envs 6 --board 12 --out {R}
 !rm -rf {R}
@@ -70,7 +81,7 @@ Confirms ES lifts a *random* graph above the floor on retina. If this fails, the
 setup is broken — fix reward / curriculum / `--inner-steps` before the real arms.
 
 ```python
-!python es_colab.py --arm synthetic --obs retina --hops 3 --generations 120 --seed 0 --out /content/drive/MyDrive/flysnake/runs
+!python es_colab.py --arm synthetic --obs retina --hops 3 --generations 120 --seed 0 --out /content/drive/MyDrive/flybrain/runs
 ```
 
 Bar: `eval score mean` climbing clearly past the printed random-policy floor
@@ -82,13 +93,13 @@ Run each in its own cell (or sequentially; each ~1–3 h on a T4 at 150 gens).
 `--resume` is on by default, so re-running a cell after a disconnect continues.
 
 ```python
-!python es_colab.py --arm real --obs retina --hops 3 --generations 150 --seed 0 --out /content/drive/MyDrive/flysnake/runs
+!python es_colab.py --arm real --obs retina --hops 3 --generations 150 --seed 0 --out /content/drive/MyDrive/flybrain/runs
 ```
 ```python
-!python es_colab.py --arm rewire --obs retina --hops 3 --generations 150 --seed 0 --out /content/drive/MyDrive/flysnake/runs
+!python es_colab.py --arm rewire --obs retina --hops 3 --generations 150 --seed 0 --out /content/drive/MyDrive/flybrain/runs
 ```
 ```python
-!python es_colab.py --arm synthetic --obs retina --hops 3 --generations 150 --seed 0 --out /content/drive/MyDrive/flysnake/runs
+!python es_colab.py --arm synthetic --obs retina --hops 3 --generations 150 --seed 0 --out /content/drive/MyDrive/flybrain/runs
 ```
 
 For CIs, repeat with `--seed 1 --seed 2` (each seed redraws ports/readout *and*
@@ -98,7 +109,7 @@ the scramble, so real vs control stays matched).
 
 ```python
 import pickle, glob, numpy as np, matplotlib.pyplot as plt
-runs = sorted(glob.glob('/content/drive/MyDrive/flysnake/runs/*_retina_h3_*.pkl'))
+runs = sorted(glob.glob('/content/drive/MyDrive/flybrain/runs/*_retina_h3_*.pkl'))
 plt.figure(figsize=(8,5))
 for f in runs:
     d = pickle.load(open(f,'rb'))
