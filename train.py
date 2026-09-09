@@ -27,6 +27,7 @@ gradient.
 """
 
 import argparse
+import os
 import pickle
 import time
 
@@ -323,39 +324,60 @@ def rank_normalise(x):
 def es_train(brain, *, generations=150, pop=64, sigma=0.06, lr=0.03,
              n_envs=8, board=12, max_ticks=350, max_idle=90, shaping=0.3,
              gain_init=2.0, warm_start=True, readout_sigma_frac=0.25,
-             seed=0, eval_every=10, out=None):
+             obs_mode="feature", reflex=False, seed=0, eval_every=10, out=None,
+             resume=False):
+    """`obs_mode` / `reflex` thread through to every rollout and eval. For the
+    retina arm: obs_mode="retina", reflex=True (the survival floor that makes
+    the fitness landscape climbable), warm_start=False (a frozen random draw
+    carries no bearing -- the regression would return ~zero, see
+    explore/retina_results.md), and let ES perturb the readout at full scale.
+
+    `resume=True` picks up from the `out` checkpoint (theta, Adam state, gen)
+    -- Colab sessions get reclaimed, so a long run must survive a restart.
+    """
+    assert not (warm_start and brain.device != "cpu"), \
+        "warm starts run numpy ops on h; use a cpu Brain for them, or " \
+        "warm_start=False (which retina wants anyway)"
+    ev = dict(obs_mode=obs_mode, reflex=reflex, max_idle=200)
+
     rng = np.random.default_rng(seed)
     theta = brain.init_params(seed=seed, gain_init=gain_init)
-    if warm_start:
+    d = theta.size
+    m, v = np.zeros(d), np.zeros(d)
+    history, gen0 = [], 0
+
+    if resume and out and os.path.exists(out):
+        with open(out, "rb") as fh:
+            ck = pickle.load(fh)
+        theta, m, v = ck["theta"], ck["adam_m"], ck["adam_v"]
+        history, gen0 = ck["history"], ck["gen"]
+        print(f"resumed from {out} at gen {gen0}", flush=True)
+    elif warm_start:
         theta = warm_start_readout(brain, theta, seed=seed)
         fm, sm, sx = evaluate(brain, theta, 40, board, 3 * max_ticks,
-                              seed=99, max_idle=200)
+                              seed=99, **ev)
         print(f"warm-start readout: eval score mean {sm:.2f}  max {sx:.0f}",
               flush=True)
-    d = theta.size
 
-    # Per-block perturbation scale. The warm-started readout weights are large
-    # and sensitive -- a full-size perturbation there collapses the policy to
-    # constant-action and the gradient turns to noise. So perturb the readout
-    # gently and let ES mostly work the biophysical knobs (gain/tau/bias), which
-    # is the more faithful thing to be tuning anyway.
+    # Per-block perturbation scale. A warm-started readout is large and
+    # sensitive -- a full-size perturbation there collapses the policy to
+    # constant-action and the gradient turns to noise, so perturb it gently and
+    # let ES mostly work the biophysical knobs. Without a warm start (retina)
+    # the readout starts near zero and SHOULD be perturbed at full scale.
     pscale = np.ones(d)
     if warm_start:
         pscale[brain._t:] = readout_sigma_frac
 
-    # Adam on the ES gradient estimate
-    m = np.zeros(d)
-    v = np.zeros(d)
     b1, b2, eps = 0.9, 0.999, 1e-8
-
-    history = []
     t0 = time.time()
-    for gen in range(1, generations + 1):
+    for gen in range(gen0 + 1, generations + 1):
         E = rng.normal(size=(pop, d)) * pscale        # antithetic perturbations
         board_seed = int(rng.integers(1 << 30))       # CRN: shared this gen
         thetas = np.concatenate([theta + sigma * E, theta - sigma * E], axis=0)
         fit_grid, _ = rollout_pop(brain, thetas, n_envs, board, max_ticks,
-                                  board_seed, max_idle=max_idle, shaping=shaping)
+                                  board_seed, obs_mode=obs_mode,
+                                  max_idle=max_idle, shaping=shaping,
+                                  reflex=reflex)
         fit = fit_grid.mean(axis=1)                   # (2*pop,)
 
         shaped = rank_normalise(fit)
@@ -372,7 +394,7 @@ def es_train(brain, *, generations=150, pop=64, sigma=0.06, lr=0.03,
                "sec": time.time() - t0}
         if gen % eval_every == 0 or gen == 1:
             fm, sm, sx = evaluate(brain, theta, 40, board, 3 * max_ticks,
-                                  seed=99, max_idle=200)
+                                  seed=99, **ev)
             row.update(eval_fit=fm, eval_score_mean=sm, eval_score_max=sx)
             print(f"gen {gen:4d}  {row['sec']:6.0f}s  pop fit {fit.mean():+.2f}"
                   f"  |  eval score mean {sm:5.2f}  max {sx:3.0f}", flush=True)
@@ -383,9 +405,11 @@ def es_train(brain, *, generations=150, pop=64, sigma=0.06, lr=0.03,
 
         if out:
             with open(out, "wb") as fh:
-                pickle.dump({"theta": theta, "history": history,
+                pickle.dump({"theta": theta, "history": history, "gen": gen,
+                             "adam_m": m, "adam_v": v,
                              "cfg": dict(pop=pop, sigma=sigma, lr=lr,
-                                         board=board, gain_init=gain_init)}, fh)
+                                         board=board, gain_init=gain_init,
+                                         obs_mode=obs_mode, reflex=reflex)}, fh)
     return theta, history
 
 

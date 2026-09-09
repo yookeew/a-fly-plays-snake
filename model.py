@@ -1,9 +1,14 @@
 """
 Step 3c: the model. A rate RNN over a fixed connectome.
 
-numpy, not torch: ES only ever calls the forward pass, so autograd buys nothing
-and torch would be an 800 MB install for no gain. The port to torch belongs to
-v2, where mushroom-body plasticity actually needs gradients.
+numpy by default: ES only ever calls the forward pass, so autograd buys nothing
+and torch would be an 800 MB install for no gain. `Brain(cx, device="cuda")`
+switches the population forward pass (`unpack_pop` / `initial_state_pop` /
+`step_pop` / `act_pop`, the only path ES exercises) onto a GPU via torch sparse
+-- needed for ES on the retina obs, where the biophysics must be *trained* (a
+frozen random draw carries no bearing) and a full-connectome CPU generation is
+minutes. Everything else -- `step` / `act`, the warm starts, watch.py, the
+checks -- stays numpy/CPU and needs no torch. Parity: `explore/torch_parity.py`.
 
 The connectome (W, its signs, its sparsity) is FROZEN. What gets trained is a
 handful of biophysical knobs the electron microscope cannot see -- one gain, one
@@ -52,12 +57,14 @@ class Brain:
         bias  = bias                        tonic drive, per type
     """
 
-    def __init__(self, cx, r_max=1.0, dt=1.0, inner_steps=8, dtype=np.float32):
+    def __init__(self, cx, r_max=1.0, dt=1.0, inner_steps=8, dtype=np.float32,
+                 device="cpu"):
         self.cx = cx
         self.r_max = float(r_max)
         self.dt = float(dt)
         self.inner_steps = int(inner_steps)
         self.dtype = dtype
+        self.device = device
 
         self.n = cx.n
         self.n_types = cx.n_types
@@ -81,6 +88,36 @@ class Brain:
 
         self._t = 3 * self.n_types
         self.n_params = self._t + N_ACT * self.n_out + N_ACT
+
+        if device != "cpu":
+            self._to_torch(device)
+
+    # ------------------------------------------------------------------- torch
+    #
+    # Minimal GPU path: only the batched population forward pass moves to the
+    # device. `obs` arrives from the CPU envs as numpy and `logits` come back as
+    # numpy so the caller (rollout_pop) does argmax / the collision reflex / the
+    # env step exactly as before -- `h` is the one tensor that stays on device,
+    # passed back opaquely each tick.
+
+    def _to_torch(self, device):
+        import torch
+
+        self._torch = torch
+        self._tdt = torch.float32
+
+        def _csr(m):
+            m = sp.csr_matrix(m)
+            return torch.sparse_csr_tensor(
+                torch.from_numpy(m.indptr.astype(np.int64)),
+                torch.from_numpy(m.indices.astype(np.int64)),
+                torch.from_numpy(m.data.astype(np.float32)),
+                size=m.shape, device=device)
+
+        self.W_t = _csr(self.W)
+        self.P_t = _csr(self.P)
+        self.out_idx_t = torch.as_tensor(self.out_idx, dtype=torch.int64,
+                                         device=device)
 
     # ------------------------------------------------------------------ params
 
@@ -159,18 +196,29 @@ class Brain:
         wt = thetas[:, t:t + N_ACT * self.n_out].reshape(C, N_ACT, self.n_out)
         b_out = thetas[:, t + N_ACT * self.n_out:][:, :, None]
         # (1 - alpha) is used every inner step; fold it in here once.
-        return alpha, (1.0 - alpha).astype(dt), gain, bias, \
-            wt.astype(dt), b_out.astype(dt)
+        out = (alpha, (1.0 - alpha).astype(dt), gain, bias,
+               wt.astype(dt), b_out.astype(dt))
+        if self.device == "cpu":
+            return out
+        t_ = self._torch
+        return tuple(t_.as_tensor(x, dtype=self._tdt, device=self.device)
+                     for x in out)
 
     def initial_state_pop(self, C, E):
-        return np.zeros((self.n, C, E), dtype=self.dtype)
+        if self.device == "cpu":
+            return np.zeros((self.n, C, E), dtype=self.dtype)
+        return self._torch.zeros((self.n, C, E), dtype=self._tdt,
+                                 device=self.device)
 
     def step_pop(self, h, obs, params):
         """h (n, C, E), obs (C, E, n_obs) -> h, logits (C, N_ACT, E).
 
         In-place arithmetic in the inner loop -- at (n x C x E) every temporary
-        array allocation shows up in the wall time.
+        array allocation shows up in the wall time. On device, `h` is a torch
+        tensor passed straight back each tick; `logits` returns as numpy.
         """
+        if self.device != "cpu":
+            return self._step_pop_torch(h, obs, params)
         alpha, one_minus_alpha, gain, bias, wt, b_out = params
         n, C, E = h.shape
         I = (self.P @ obs.reshape(C * E, -1).T).reshape(n, C, E).astype(self.dtype)
@@ -189,6 +237,23 @@ class Brain:
         r_out = r_out - r_out.mean(axis=0, keepdims=True)
         logits = np.einsum("oce,cko->cke", r_out, wt) + b_out
         return h, logits
+
+    def _step_pop_torch(self, h, obs, params):
+        t_ = self._torch
+        alpha, one_minus_alpha, gain, bias, wt, b_out = params
+        n, C, E = h.shape
+        obs_t = t_.as_tensor(np.ascontiguousarray(obs.reshape(C * E, -1).T),
+                             dtype=self._tdt, device=self.device)
+        drive = bias + t_.sparse.mm(self.P_t, obs_t).reshape(n, C, E)
+        for _ in range(self.inner_steps):
+            r = h.clamp(0.0, self.r_max).reshape(n, C * E)
+            rec = t_.sparse.mm(self.W_t, r).reshape(n, C, E)
+            h = one_minus_alpha * h + alpha * (gain * rec + drive)
+        r = h.clamp(0.0, self.r_max)
+        r_out = r[self.out_idx_t]                        # (n_out, C, E)
+        r_out = r_out - r_out.mean(dim=0, keepdim=True)
+        logits = t_.einsum("oce,cko->cke", r_out, wt) + b_out
+        return h, logits.detach().cpu().numpy()
 
     def act_pop(self, h, obs, params):
         h, logits = self.step_pop(h, obs, params)
