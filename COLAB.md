@@ -80,26 +80,37 @@ Read the `sec` on gen 2 (gen 1 includes the connectome load). Pick the deepest
 Confirms ES lifts a *random* graph above the floor on retina. If this fails, the
 setup is broken — fix reward / curriculum / `--inner-steps` before the real arms.
 
+Uses a board-size curriculum (`--board-min 6`, grows to 12): on a cold board-12
+start every candidate eats ~0 and the ES gradient is noise, so start small where
+random play hits food and there's variance to climb.
+
 ```python
-!python es_colab.py --arm synthetic --obs retina --hops 3 --generations 120 --seed 0 --out /content/drive/MyDrive/flybrain/runs
+# clear any checkpoint from an earlier (pre-curriculum) run first
+!rm -f /content/drive/MyDrive/flybrain/runs/synthetic_retina_h3_*.pkl
+!python es_colab.py --arm synthetic --obs retina --hops 3 --generations 120 --board-grow-every 8 --seed 0 --out /content/drive/MyDrive/flybrain/runs
 ```
 
-Bar: `eval score mean` climbing clearly past the printed random-policy floor
-(~0.2), ideally to 5+. Watch the first ~20 gens — if it's flat at 0, kill it.
+What to watch:
+- `bd` column ramps 6 → 12 (one step every 8 gens, full board by ~gen 50).
+- `pop fit` should be clearly **positive and rising** on the small boards
+  (gens 1–20). Flat noise there = still broken.
+- `eval score mean` (always board 12) starts near 0 and should climb once `bd`
+  passes ~9. Bar: past the printed random floor (~0.2), ideally 5+ by gen 120.
 
 ### Cell 5 — the three arms
 
-Run each in its own cell (or sequentially; each ~1–3 h on a T4 at 150 gens).
-`--resume` is on by default, so re-running a cell after a disconnect continues.
+Only once Cell 4 has cleared the bar. Run each in its own cell (or sequentially;
+each ~1–3 h on a T4 at 150 gens). Same curriculum as Cell 4. `--resume` is on by
+default, so re-running a cell after a disconnect continues.
 
 ```python
-!python es_colab.py --arm real --obs retina --hops 3 --generations 150 --seed 0 --out /content/drive/MyDrive/flybrain/runs
+!python es_colab.py --arm real --obs retina --hops 3 --generations 150 --board-grow-every 8 --seed 0 --out /content/drive/MyDrive/flybrain/runs
 ```
 ```python
-!python es_colab.py --arm rewire --obs retina --hops 3 --generations 150 --seed 0 --out /content/drive/MyDrive/flybrain/runs
+!python es_colab.py --arm rewire --obs retina --hops 3 --generations 150 --board-grow-every 8 --seed 0 --out /content/drive/MyDrive/flybrain/runs
 ```
 ```python
-!python es_colab.py --arm synthetic --obs retina --hops 3 --generations 150 --seed 0 --out /content/drive/MyDrive/flybrain/runs
+!python es_colab.py --arm synthetic --obs retina --hops 3 --generations 150 --board-grow-every 8 --seed 0 --out /content/drive/MyDrive/flybrain/runs
 ```
 
 For CIs, repeat with `--seed 1 --seed 2` (each seed redraws ports/readout *and*
