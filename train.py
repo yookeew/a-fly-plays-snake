@@ -322,7 +322,8 @@ def rank_normalise(x):
 # -------------------------------------------------------------------------- ES
 
 def es_train(brain, *, generations=150, pop=64, sigma=0.06, lr=0.03,
-             n_envs=8, board=12, max_ticks=350, max_idle=90, shaping=0.3,
+             n_envs=8, board=12, board_min=None, board_grow_every=15,
+             max_ticks=350, max_idle=90, shaping=0.3,
              gain_init=2.0, warm_start=True, readout_sigma_frac=0.25,
              obs_mode="feature", reflex=False, seed=0, eval_every=10, out=None,
              resume=False):
@@ -332,9 +333,24 @@ def es_train(brain, *, generations=150, pop=64, sigma=0.06, lr=0.03,
     carries no bearing -- the regression would return ~zero, see
     explore/retina_results.md), and let ES perturb the readout at full scale.
 
+    Board-size curriculum: `board_min` (default = `board`, i.e. off) sets the
+    starting board; it grows +1 every `board_grow_every` generations up to
+    `board`. On a small board a reflex-filtered random walk eats food often, so
+    there is real fitness variance for ES to climb; on the full board from cold
+    start every candidate scores ~0 and the gradient is noise. Training ticks /
+    idle-cutoff scale with the current board; EVAL is always on the full
+    `board`, so the eval curve is comparable across generations.
+
     `resume=True` picks up from the `out` checkpoint (theta, Adam state, gen)
     -- Colab sessions get reclaimed, so a long run must survive a restart.
     """
+    board_min = board if board_min is None else min(board_min, board)
+
+    def curr(gen):
+        bd = min(board, board_min + max(0, gen - 1) // board_grow_every)
+        if board_min == board:            # curriculum off: honour passed args
+            return bd, max_ticks, max_idle
+        return bd, min(max_ticks, 4 * bd * bd), max(50, bd * bd)
     assert not (warm_start and brain.device != "cpu"), \
         "warm starts run numpy ops on h; use a cpu Brain for them, or " \
         "warm_start=False (which retina wants anyway)"
@@ -371,12 +387,13 @@ def es_train(brain, *, generations=150, pop=64, sigma=0.06, lr=0.03,
     b1, b2, eps = 0.9, 0.999, 1e-8
     t0 = time.time()
     for gen in range(gen0 + 1, generations + 1):
+        bd, ticks, idle = curr(gen)
         E = rng.normal(size=(pop, d)) * pscale        # antithetic perturbations
         board_seed = int(rng.integers(1 << 30))       # CRN: shared this gen
         thetas = np.concatenate([theta + sigma * E, theta - sigma * E], axis=0)
-        fit_grid, _ = rollout_pop(brain, thetas, n_envs, board, max_ticks,
+        fit_grid, _ = rollout_pop(brain, thetas, n_envs, bd, ticks,
                                   board_seed, obs_mode=obs_mode,
-                                  max_idle=max_idle, shaping=shaping,
+                                  max_idle=idle, shaping=shaping,
                                   reflex=reflex)
         fit = fit_grid.mean(axis=1)                   # (2*pop,)
 
@@ -390,17 +407,18 @@ def es_train(brain, *, generations=150, pop=64, sigma=0.06, lr=0.03,
         vhat = v / (1 - b2 ** gen)
         theta += lr * mhat / (np.sqrt(vhat) + eps)
 
-        row = {"gen": gen, "fit_mean": fit.mean(), "fit_best": fit.max(),
-               "sec": time.time() - t0}
+        row = {"gen": gen, "board": bd, "fit_mean": fit.mean(),
+               "fit_best": fit.max(), "sec": time.time() - t0}
         if gen % eval_every == 0 or gen == 1:
             fm, sm, sx = evaluate(brain, theta, 40, board, 3 * max_ticks,
                                   seed=99, **ev)
             row.update(eval_fit=fm, eval_score_mean=sm, eval_score_max=sx)
-            print(f"gen {gen:4d}  {row['sec']:6.0f}s  pop fit {fit.mean():+.2f}"
-                  f"  |  eval score mean {sm:5.2f}  max {sx:3.0f}", flush=True)
+            print(f"gen {gen:4d}  {row['sec']:6.0f}s  bd {bd:2d}  "
+                  f"pop fit {fit.mean():+.2f}  |  eval score mean {sm:5.2f}  "
+                  f"max {sx:3.0f}", flush=True)
         else:
-            print(f"gen {gen:4d}  {row['sec']:6.0f}s  pop fit {fit.mean():+.2f}",
-                  flush=True)
+            print(f"gen {gen:4d}  {row['sec']:6.0f}s  bd {bd:2d}  "
+                  f"pop fit {fit.mean():+.2f}", flush=True)
         history.append(row)
 
         if out:

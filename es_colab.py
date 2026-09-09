@@ -70,11 +70,15 @@ if __name__ == "__main__":
     ap.add_argument("--pop", type=int, default=48)
     ap.add_argument("--n-envs", type=int, default=6)
     ap.add_argument("--board", type=int, default=12)
-    ap.add_argument("--max-ticks", type=int, default=300)
+    ap.add_argument("--board-min", type=int, default=6,
+                    help="curriculum start board; grows to --board. "
+                         "set == --board to disable")
+    ap.add_argument("--board-grow-every", type=int, default=12)
+    ap.add_argument("--max-ticks", type=int, default=350)
     ap.add_argument("--inner-steps", type=int, default=16)
     ap.add_argument("--sigma", type=float, default=0.06)
     ap.add_argument("--lr", type=float, default=0.03)
-    ap.add_argument("--shaping", type=float, default=0.4)
+    ap.add_argument("--shaping", type=float, default=1.0)
     ap.add_argument("--gain-init", type=float, default=2.0)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda")
@@ -105,8 +109,8 @@ if __name__ == "__main__":
     warm = a.obs == "feature" and a.feature_warm_start
     es_train(
         brain, generations=a.generations, pop=a.pop, sigma=a.sigma, lr=a.lr,
-        n_envs=a.n_envs, board=a.board, max_ticks=a.max_ticks,
-        max_idle=max(60, a.board * a.board // 2), shaping=a.shaping,
-        gain_init=a.gain_init, warm_start=warm, readout_sigma_frac=0.25,
-        obs_mode=a.obs, reflex=True, seed=a.seed, eval_every=10,
-        out=ckpt, resume=not a.no_resume)
+        n_envs=a.n_envs, board=a.board, board_min=a.board_min,
+        board_grow_every=a.board_grow_every, max_ticks=a.max_ticks,
+        shaping=a.shaping, gain_init=a.gain_init, warm_start=warm,
+        readout_sigma_frac=0.25, obs_mode=a.obs, reflex=True, seed=a.seed,
+        eval_every=10, out=ckpt, resume=not a.no_resume)
