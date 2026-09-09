@@ -197,8 +197,8 @@ class SnakeEnv:
             return self.observe(), reward - 10.0, True
 
         self.body.appendleft(head)
-        self.occupied.add(head)
         if growing:
+            self.occupied.add(head)
             self.score += 1
             self.idle = 0
             reward += 10.0
@@ -206,7 +206,13 @@ class SnakeEnv:
         else:
             self.body.pop()
             self.occupied.discard(tail)
-            self.idle += 1
+            self.occupied.add(head)      # AFTER the discard: when the head
+            self.idle += 1               # legally follows its own vacating tail
+            #                             head == tail, and discarding tail first
+            #                             would otherwise punch a permanent hole
+            #                             in `occupied` -- the snake then walks
+            #                             through its own body. Compounds into a
+            #                             ghost snake once it loops on itself.
 
         self.steps += 1
         if self.idle >= self.max_idle:       # went too long without eating
@@ -307,7 +313,15 @@ def play(mode="human", seed=None, headless=False, episodes=1, fps=12,
     CELL, HUD_H, PAD = 24, 176, 12
     env = SnakeEnv(width, height, wrap, obs, retina, seed=seed)
     BW, BH = env.W * CELL, env.H * CELL
-    screen = pygame.display.set_mode((BW + 2 * PAD, BH + 2 * PAD + HUD_H))
+    # The HUD needs a fixed minimum width regardless of board size -- a small
+    # board (watch.py defaults to 12) otherwise clips the second feature column
+    # / the wall channel off the right edge. Widen the window to fit the HUD and
+    # centre the board in it.
+    HUD_W = (PAD + 2 * 240 + PAD) if env.obs_mode == "feature" \
+        else (PAD + 3 * (env.K * 14 + 24) + 200)
+    WIN_W = max(BW + 2 * PAD, HUD_W)
+    OX = (WIN_W - BW) // 2
+    screen = pygame.display.set_mode((WIN_W, BH + 2 * PAD + HUD_H))
     pygame.display.set_caption(f"snake [{mode}]")
     font = pygame.font.SysFont("monospace", 13)
     big = pygame.font.SysFont("monospace", 20, bold=True)
@@ -315,7 +329,7 @@ def play(mode="human", seed=None, headless=False, episodes=1, fps=12,
 
     def cell_rect(c):
         x, y = c
-        return pygame.Rect(PAD + x * CELL + 1,
+        return pygame.Rect(OX + x * CELL + 1,
                            PAD + (env.H - 1 - y) * CELL + 1,
                            CELL - 2, CELL - 2)
 
@@ -365,11 +379,11 @@ def play(mode="human", seed=None, headless=False, episodes=1, fps=12,
 
         screen.fill(COLORS["bg"])
         for x in range(env.W + 1):
-            pygame.draw.line(screen, COLORS["grid"], (PAD + x * CELL, PAD),
-                             (PAD + x * CELL, PAD + BH))
+            pygame.draw.line(screen, COLORS["grid"], (OX + x * CELL, PAD),
+                             (OX + x * CELL, PAD + BH))
         for y in range(env.H + 1):
-            pygame.draw.line(screen, COLORS["grid"], (PAD, PAD + y * CELL),
-                             (PAD + BW, PAD + y * CELL))
+            pygame.draw.line(screen, COLORS["grid"], (OX, PAD + y * CELL),
+                             (OX + BW, PAD + y * CELL))
         if env.food:
             pygame.draw.rect(screen, COLORS["food"], cell_rect(env.food),
                              border_radius=6)
@@ -379,7 +393,7 @@ def play(mode="human", seed=None, headless=False, episodes=1, fps=12,
 
         # ---- HUD: exactly what the brain will receive
         hud_y = PAD * 2 + BH
-        pygame.draw.rect(screen, COLORS["hud"], (0, hud_y, BW + 2 * PAD, HUD_H))
+        pygame.draw.rect(screen, COLORS["hud"], (0, hud_y, WIN_W, HUD_H))
         if env.obs_mode == "feature":
             for i, (name, v) in enumerate(zip(FEATURE_NAMES, observation)):
                 col_i, row_i = i // 5, i % 5
@@ -415,7 +429,7 @@ def play(mode="human", seed=None, headless=False, episodes=1, fps=12,
             status += "  PAUSED"
         status_surf = big.render(status, True, COLORS["text"])
         screen.blit(status_surf,
-                    ((BW + 2 * PAD - status_surf.get_width()) // 2,
+                    ((WIN_W - status_surf.get_width()) // 2,
                      hud_y + HUD_H - 36))
         pygame.display.flip()
         clock.tick(fps)

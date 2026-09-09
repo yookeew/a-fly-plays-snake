@@ -34,7 +34,7 @@ import numpy as np
 
 from brain import make_synthetic, load_flywire
 from model import Brain, N_ACT
-from snake import SnakeEnv, FEATURE_NAMES, greedy_bot
+from snake import SnakeEnv, FEATURE_NAMES, greedy_bot, lethal_actions
 
 FOOD_SIN = FEATURE_NAMES.index("food_sin")
 FOOD_COS = FEATURE_NAMES.index("food_cos")
@@ -52,7 +52,7 @@ def _food_dist(env):
 
 
 def rollout_pop(brain, thetas, n_envs, board, max_ticks, seed,
-                obs_mode="feature", max_idle=200, shaping=0.0):
+                obs_mode="feature", max_idle=200, shaping=0.0, reflex=False):
     """Episodes for a whole population at once. thetas (C, n_params).
 
     Returns (fitness, scores), each (C, n_envs). score = food eaten, ALWAYS the
@@ -76,6 +76,12 @@ def rollout_pop(brain, thetas, n_envs, board, max_ticks, seed,
 
     Every candidate sees the SAME n_envs boards (seed independent of candidate):
     common random numbers, on top of antithetic sampling.
+
+    `reflex` masks any move that kills the snake this tick out of the logits
+    before argmax (snake.lethal_actions) -- the same brainstem collision veto
+    watch.py applies. The connectome routes danger_* to the descending neurons
+    too weakly to survive on its own; with the reflex as a floor the policy is
+    no longer a fragile spike, so ES has something to climb.
     """
     C = thetas.shape[0]
     params = brain.unpack_pop(thetas)
@@ -94,13 +100,23 @@ def rollout_pop(brain, thetas, n_envs, board, max_ticks, seed,
     fitness = np.zeros((C, n_envs))
 
     for _ in range(max_ticks):
-        h, acts = brain.act_pop(h, obs, params)          # (C, n_envs)
+        if reflex:
+            h, logits = brain.step_pop(h, obs, params)    # (C, N_ACT, n_envs)
+            acts = np.argmax(logits, axis=1)              # (C, n_envs)
+        else:
+            h, acts = brain.act_pop(h, obs, params)       # (C, n_envs)
         for c in range(C):
             row = envs[c]
             for i in range(n_envs):
                 if done[c, i]:
                     continue
                 e = row[i]
+                if reflex:
+                    m = lethal_actions(e)
+                    if not m.all():
+                        lg = logits[c, :, i].copy()
+                        lg[m] = -np.inf
+                        acts[c, i] = np.argmax(lg)
                 grew = e.score
                 o, r_env, d = e.step(int(acts[c, i]))
                 obs[c, i] = o
@@ -123,10 +139,10 @@ def rollout_pop(brain, thetas, n_envs, board, max_ticks, seed,
 
 
 def evaluate(brain, theta, n_envs, board, max_ticks, seed, max_idle=200,
-             obs_mode="feature"):
+             obs_mode="feature", reflex=False):
     """Honest score: raw reward (shaping=0), on whatever board is passed."""
     fit, sc = rollout_pop(brain, theta[None, :], n_envs, board, max_ticks, seed,
-                          obs_mode=obs_mode, max_idle=max_idle)
+                          obs_mode=obs_mode, max_idle=max_idle, reflex=reflex)
     return fit.mean(), sc.mean(), sc.max()
 
 
