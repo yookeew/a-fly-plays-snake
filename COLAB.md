@@ -116,6 +116,28 @@ default, so re-running a cell after a disconnect continues.
 For CIs, repeat with `--seed 1 --seed 2` (each seed redraws ports/readout *and*
 the scramble, so real vs control stays matched).
 
+### Cell 5b — behaviour cloning (the pivot, PROJECT.md sec 4)
+
+ES stalled (neither converges cold nor refines from the warm-start spike). BC
+trains the same knobs by gradient descent against greedy_bot targets — dense
+per-tick supervision, no reward/exploration/spike. Start with the sanity arm:
+
+```python
+!python bc.py --arm synthetic --obs retina --hops 3 --epochs 40 --out /content/drive/MyDrive/flybrain/runs
+```
+
+Bar: `food` (honest, board 12) climbing past the ~0.2 floor as `loss` drops. If
+a *random* graph's BC gets to 5+, the pipeline works — then the three arms:
+
+```python
+!python bc.py --arm real   --obs retina --hops 3 --epochs 60 --seed 0 --out /content/drive/MyDrive/flybrain/runs
+!python bc.py --arm rewire  --obs retina --hops 3 --epochs 60 --seed 0 --out /content/drive/MyDrive/flybrain/runs
+!python bc.py --arm synthetic --obs retina --hops 3 --epochs 60 --seed 0 --out /content/drive/MyDrive/flybrain/runs
+```
+
+North-star question: does `real` beat `rewire` / `synthetic`? Plus the
+mechanistic check — re-run the bearing-R² probe on each trained `theta`.
+
 ### Cell 6 — compare
 
 ```python

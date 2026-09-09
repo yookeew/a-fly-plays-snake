@@ -220,11 +220,16 @@ a hybrid feature+retina obs, or pivot the task itself to odor-plume tracking
 
 ## 5. Status
 
-- **Branch `es`** holds the reflex, the retina probes, and the (stalled) ES/GPU
-  scaffolding.
+- **Branch `es`** holds the reflex, the retina probes, the (stalled) ES/GPU
+  scaffolding, and now `bc.py`.
 - **Deliverable in hand:** the step-5 result — real connectome loses to
   degree/density-matched scrambles on `feature`-obs Snake, reflex or not.
-- **Now building:** behaviour cloning (`train.py` / a new `bc.py`), torch,
-  greedy_bot targets, per-neuron biophysics option.
+- **Now:** `bc.py` — behaviour cloning against greedy_bot. Per-type biophysics
+  (packs into `model.Brain`'s theta), truncated one-tick BC, torch. Runs via
+  `COLAB.md` cell 5b: synthetic-retina sanity first, then real / rewire /
+  synthetic, then the bearing-R² check on each trained network.
+- **If BC also can't lift real above the scrambles:** Δretina (motion) input,
+  coarser retinotopic code, hybrid feature+retina, or pivot the task to
+  odor-plume tracking (`snake_continuous.py`).
 - **Open controls debt** (from `step5_results.md`): match control seeds to real
-  I/O seeds, add CIs, more seeds.
+  I/O seeds, add CIs, more seeds. Per-neuron biophysics is a later BC knob.
