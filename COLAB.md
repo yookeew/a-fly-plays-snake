@@ -54,11 +54,10 @@ showed `full=True` gives no R² gain over a subgraph, so only bench it (`--full`
 if you're curious.
 
 ```python
-for hops in (3, 4):
-    print(f"\n===== hops={hops} =====")
-    !python es_colab.py --arm real --obs retina --hops {hops} \
-        --generations 2 --pop 48 --n-envs 6 --board 12 \
-        --out /content/drive/MyDrive/flysnake/runs/_bench
+R = "/content/drive/MyDrive/flysnake/runs/_bench"
+!python es_colab.py --arm real --obs retina --hops 3 --generations 2 --pop 48 --n-envs 6 --board 12 --out {R}
+!python es_colab.py --arm real --obs retina --hops 4 --generations 2 --pop 48 --n-envs 6 --board 12 --out {R}
+!rm -rf {R}
 ```
 
 Read the `sec` on gen 2 (gen 1 includes the connectome load). Pick the deepest
@@ -71,9 +70,7 @@ Confirms ES lifts a *random* graph above the floor on retina. If this fails, the
 setup is broken — fix reward / curriculum / `--inner-steps` before the real arms.
 
 ```python
-!python es_colab.py --arm synthetic --obs retina --hops 3 \
-    --generations 120 --seed 0 \
-    --out /content/drive/MyDrive/flysnake/runs
+!python es_colab.py --arm synthetic --obs retina --hops 3 --generations 120 --seed 0 --out /content/drive/MyDrive/flysnake/runs
 ```
 
 Bar: `eval score mean` climbing clearly past the printed random-policy floor
@@ -85,16 +82,13 @@ Run each in its own cell (or sequentially; each ~1–3 h on a T4 at 150 gens).
 `--resume` is on by default, so re-running a cell after a disconnect continues.
 
 ```python
-!python es_colab.py --arm real   --obs retina --hops 3 --generations 150 --seed 0 \
-    --out /content/drive/MyDrive/flysnake/runs
+!python es_colab.py --arm real --obs retina --hops 3 --generations 150 --seed 0 --out /content/drive/MyDrive/flysnake/runs
 ```
 ```python
-!python es_colab.py --arm rewire --obs retina --hops 3 --generations 150 --seed 0 \
-    --out /content/drive/MyDrive/flysnake/runs
+!python es_colab.py --arm rewire --obs retina --hops 3 --generations 150 --seed 0 --out /content/drive/MyDrive/flysnake/runs
 ```
 ```python
-!python es_colab.py --arm synthetic --obs retina --hops 3 --generations 150 --seed 0 \
-    --out /content/drive/MyDrive/flysnake/runs
+!python es_colab.py --arm synthetic --obs retina --hops 3 --generations 150 --seed 0 --out /content/drive/MyDrive/flysnake/runs
 ```
 
 For CIs, repeat with `--seed 1 --seed 2` (each seed redraws ports/readout *and*
