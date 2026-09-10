@@ -120,20 +120,31 @@ the scramble, so real vs control stays matched).
 
 ES stalled (neither converges cold nor refines from the warm-start spike). BC
 trains the same knobs by gradient descent against greedy_bot targets — dense
-per-tick supervision, no reward/exploration/spike. Start with the sanity arm:
+per-tick supervision, no reward/exploration/spike. BC backprops once per game
+tick (h detached between ticks), so memory is O(1) in episode length; if you
+OOM, drop `--batch` (default 24) / `--hops` / `--max-ticks`.
+
+greedy_bot goes **straight 76%** of ticks, so BC is class-balanced by default
+(`--no-balance` to see the collapse). Watch `acc` and `pred L/S/R` — if `pred`
+is `[0.0, 1.0, 0.0]` it's still collapsed to "always straight".
+
+**Step 1 — does BC work at all?** `feature` obs carries the bearing (R²=0.63
+even frozen), so BC *must* be able to clone greedy here. Fast (10 inputs).
 
 ```python
-import os
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-!PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python bc.py --arm synthetic --obs retina --hops 3 --epochs 40 --out /content/drive/MyDrive/flybrain/runs
+!python bc.py --arm synthetic --obs feature --epochs 30 --out /content/drive/MyDrive/flybrain/runs
 ```
 
-BC backprops once per game tick (h is detached between ticks), so memory is O(1)
-in episode length. If you still OOM, drop `--batch` (default 24) or `--hops` /
-`--max-ticks`.
+Bar: `food` climbs to 8+ and `pred` is not all-straight. If it can't clone
+greedy on feature obs, the BC code is broken — stop and fix that.
 
-Bar: `food` (honest, board 12) climbing past the ~0.2 floor as `loss` drops. If
-a *random* graph's BC gets to 5+, the pipeline works — then the three arms:
+**Step 2 — retina sanity.** Random graph, retina obs:
+
+```python
+!python bc.py --arm synthetic --obs retina --hops 3 --epochs 40 --out /content/drive/MyDrive/flybrain/runs
+```
+
+**Step 3 — the three arms** (only if step 2 clears the floor):
 
 ```python
 !python bc.py --arm real   --obs retina --hops 3 --epochs 60 --seed 0 --out /content/drive/MyDrive/flybrain/runs

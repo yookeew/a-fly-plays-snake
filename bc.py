@@ -90,13 +90,20 @@ class BCBrain:
     """
 
     def __init__(self, cx, inner_steps=16, gain_init=2.0, r_max=1.0,
-                 device="cpu", reg=1e-3):
+                 device="cpu", reg=1e-3, class_weight=None):
         import torch
         self.t = torch
         self.dev = device
         self.inner = inner_steps
         self.r_max = r_max
         self.reg = reg
+        # greedy_bot goes straight ~76% of ticks; unweighted CE collapses to
+        # "always straight" (CE ~0.72, food at the floor). Inverse-frequency
+        # class weights force the readout to actually use the input to decide
+        # when to turn.
+        self.cw = (None if class_weight is None else
+                   torch.as_tensor(class_weight, dtype=torch.float32,
+                                   device=device))
         self.n = cx.n
         self.n_types = cx.n_types
         self.n_out = len(cx.out_idx)
@@ -156,6 +163,8 @@ class BCBrain:
 
         h = torch.zeros((self.n, B), device=self.dev)
         total = 0.0
+        n_correct = 0.0
+        pred_hist = np.zeros(N_ACT)
         for k in range(T):
             # alpha/gain/bias recomputed each tick so this tick's backward
             # reaches the params; summed per-tick grads == grad of the sum.
@@ -173,17 +182,24 @@ class BCBrain:
             r_out = r[self.out_idx]
             r_out = r_out - r_out.mean(0, keepdim=True)
             logits = self.W_out @ r_out + self.b_out[:, None]          # (3,B)
-            ce = F.cross_entropy(logits.T, act[:, k], reduction="none")
-            loss_k = (ce * mask[:, k]).sum() / denom
+            ce = F.cross_entropy(logits.T, act[:, k], weight=self.cw,
+                                 reduction="none")
+            mk = mask[:, k]
+            loss_k = (ce * mk).sum() / denom
             if loss_k.requires_grad:
                 loss_k.backward()
             total += float(loss_k)
+            with torch.no_grad():
+                pred = logits.argmax(0)
+                n_correct += float(((pred == act[:, k]).float() * mk).sum())
+                for c in range(N_ACT):
+                    pred_hist[c] += float(((pred == c).float() * mk).sum())
             h = hh.detach()
 
         reg = self.reg * ((self.raw_gain - self._gain0) ** 2
                           + (self.raw_alpha - self._alpha0) ** 2).sum()
         reg.backward()
-        return total
+        return total, n_correct, denom, pred_hist
 
     def to_theta(self):
         d = lambda x: x.detach().cpu().numpy()
@@ -194,32 +210,48 @@ class BCBrain:
 # ------------------------------------------------------------------- training
 
 def train_bc(cx, obs_mode, *, inner_steps, gain_init, epochs, batch,
-             lr, reg, boards, eps_per_board, max_ticks, board_eval,
+             lr, reg, balance, boards, eps_per_board, max_ticks, board_eval,
              device, seed, out):
     import torch
 
     rng = np.random.default_rng(seed)
     print("collecting greedy_bot rollouts...", flush=True)
     data = collect(obs_mode, boards, eps_per_board, max_ticks, seed)
-    steps = sum(len(a) for _, a in data)
-    print(f"  {len(data)} episodes, {steps} ticks, "
-          f"mean {steps / len(data):.0f}/ep", flush=True)
+    acts = np.concatenate([a for _, a in data])
+    freq = np.bincount(acts, minlength=N_ACT) / len(acts)
+    print(f"  {len(data)} episodes, {len(acts)} ticks, "
+          f"mean {len(acts) / len(data):.0f}/ep   "
+          f"greedy L/S/R {(freq * 100).round(1)}", flush=True)
 
-    bc = BCBrain(cx, inner_steps, gain_init, device=device, reg=reg)
+    cw = None
+    if balance:
+        cw = (1.0 / np.maximum(freq, 1e-3))
+        cw = cw / cw.mean()
+        print(f"  class weights {cw.round(2)}", flush=True)
+
+    bc = BCBrain(cx, inner_steps, gain_init, device=device, reg=reg,
+                 class_weight=cw)
     opt = torch.optim.Adam(bc.params(), lr=lr)
 
     cpu_brain = Brain(cx, inner_steps=inner_steps)   # for honest eval
     hist, t0 = [], time.time()
     for ep in range(1, epochs + 1):
-        tl, nb = 0.0, 0
+        tl, nb, nc, nt = 0.0, 0, 0.0, 0.0
+        ph = np.zeros(N_ACT)
         for obs, act, mask in make_batches(data, batch, rng):
             opt.zero_grad()
-            loss = bc.accumulate_grads(obs, act, mask)
+            loss, c, t, p = bc.accumulate_grads(obs, act, mask)
             torch.nn.utils.clip_grad_norm_(bc.params(), 5.0)
             opt.step()
             tl += loss
             nb += 1
-        row = {"epoch": ep, "loss": tl / nb, "sec": time.time() - t0}
+            nc += c
+            nt += t
+            ph += p
+        acc = nc / max(nt, 1)
+        row = {"epoch": ep, "loss": tl / nb, "acc": acc,
+               "pred": (ph / ph.sum()).round(2).tolist(),
+               "sec": time.time() - t0}
         if ep % 5 == 0 or ep == 1:
             th = bc.to_theta()
             _, s0, x0 = evaluate(cpu_brain, th, 40, board_eval,
@@ -230,10 +262,11 @@ def train_bc(cx, obs_mode, *, inner_steps, gain_init, epochs, batch,
                                  reflex=True)
             row.update(food=s0, food_max=x0, food_reflex=s1)
             print(f"ep {ep:3d}  {row['sec']:5.0f}s  loss {row['loss']:.3f}  "
+                  f"acc {acc:.0%}  pred L/S/R {row['pred']}  "
                   f"food {s0:5.2f} (+reflex {s1:5.2f})  max {x0:.0f}", flush=True)
         else:
-            print(f"ep {ep:3d}  {row['sec']:5.0f}s  loss {row['loss']:.3f}",
-                  flush=True)
+            print(f"ep {ep:3d}  {row['sec']:5.0f}s  loss {row['loss']:.3f}  "
+                  f"acc {acc:.0%}  pred L/S/R {row['pred']}", flush=True)
         hist.append(row)
         if out:
             with open(out, "wb") as fh:
@@ -257,6 +290,10 @@ if __name__ == "__main__":
     ap.add_argument("--batch", type=int, default=24)
     ap.add_argument("--lr", type=float, default=1e-2)
     ap.add_argument("--reg", type=float, default=1e-3)
+    ap.add_argument("--balance", dest="balance", action="store_true",
+                    default=True)
+    ap.add_argument("--no-balance", dest="balance", action="store_false",
+                    help="unweighted CE (collapses to greedy's 76%% straight)")
     ap.add_argument("--boards", type=int, nargs="+", default=[8, 10, 12])
     ap.add_argument("--eps-per-board", type=int, default=40)
     ap.add_argument("--max-ticks", type=int, default=250)
@@ -287,6 +324,7 @@ if __name__ == "__main__":
         tag += f"_n{a.neurons}"
     train_bc(cx, a.obs, inner_steps=a.inner_steps, gain_init=a.gain_init,
              epochs=a.epochs, batch=a.batch, lr=a.lr, reg=a.reg,
-             boards=tuple(a.boards), eps_per_board=a.eps_per_board,
-             max_ticks=a.max_ticks, board_eval=a.board_eval, device=device,
-             seed=a.seed, out=os.path.join(a.out, tag + ".pkl"))
+             balance=a.balance, boards=tuple(a.boards),
+             eps_per_board=a.eps_per_board, max_ticks=a.max_ticks,
+             board_eval=a.board_eval, device=device, seed=a.seed,
+             out=os.path.join(a.out, tag + ".pkl"))
