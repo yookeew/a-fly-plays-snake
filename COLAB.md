@@ -123,8 +123,14 @@ trains the same knobs by gradient descent against greedy_bot targets — dense
 per-tick supervision, no reward/exploration/spike. Start with the sanity arm:
 
 ```python
-!python bc.py --arm synthetic --obs retina --hops 3 --epochs 40 --out /content/drive/MyDrive/flybrain/runs
+import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+!PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python bc.py --arm synthetic --obs retina --hops 3 --epochs 40 --out /content/drive/MyDrive/flybrain/runs
 ```
+
+BC backprops once per game tick (h is detached between ticks), so memory is O(1)
+in episode length. If you still OOM, drop `--batch` (default 24) or `--hops` /
+`--max-ticks`.
 
 Bar: `food` (honest, board 12) climbing past the ~0.2 floor as `loss` drops. If
 a *random* graph's BC gets to 5+, the pipeline works — then the three arms:

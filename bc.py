@@ -137,40 +137,53 @@ class BCBrain:
     def params(self):
         return [self.raw_alpha, self.raw_gain, self.bias, self.W_out, self.b_out]
 
-    def seq_loss(self, obs, act, mask):
-        """obs (B,T,n_obs), act (B,T), mask (B,T) numpy -> scalar CE loss."""
+    def accumulate_grads(self, obs, act, mask):
+        """obs (B,T,n_obs), act (B,T), mask (B,T) numpy. Forward the padded
+        batch and backward ONCE PER TICK -- `h` is detached between ticks, so
+        holding the whole episode's graph is both unnecessary and (at n~60k x
+        inner~16 x T~250) a multi-GB OOM. Grads accumulate into .grad; the
+        caller does zero_grad() before and step() after. Returns mean CE
+        (float) for logging."""
         torch = self.t
+        F = torch.nn.functional
         obs = torch.as_tensor(obs, device=self.dev)
         act = torch.as_tensor(act, device=self.dev)
         mask = torch.as_tensor(mask, device=self.dev)
         B, T, _ = obs.shape
-
-        alpha = torch.sigmoid(self.raw_alpha)[self.type_id][:, None]   # (n,1)
-        gain = torch.nn.functional.softplus(self.raw_gain)[self.type_id][:, None]
-        bias = self.bias[self.type_id][:, None]
+        denom = float(mask.sum())
+        if denom == 0:
+            return 0.0
 
         h = torch.zeros((self.n, B), device=self.dev)
-        tot = torch.zeros((), device=self.dev)
+        total = 0.0
         for k in range(T):
-            I = torch.sparse.mm(self.P, obs[:, k, :].T)               # (n,B)
-            drive = bias + I
+            # alpha/gain/bias recomputed each tick so this tick's backward
+            # reaches the params; summed per-tick grads == grad of the sum.
+            alpha = torch.sigmoid(self.raw_alpha)[self.type_id][:, None]
+            gain = F.softplus(self.raw_gain)[self.type_id][:, None]
+            bias = self.bias[self.type_id][:, None]
+            drive = bias + torch.sparse.mm(self.P, obs[:, k, :].T)     # (n,B)
+            hh = h
             for _ in range(self.inner):
-                r = h.clamp(0.0, self.r_max)
+                r = hh.clamp(0.0, self.r_max)
                 rec = torch.sparse.mm(self.W, r)
-                h = (1 - alpha) * h + alpha * (gain * rec + drive)
-                h = h.clamp(-20.0, 20.0)                              # nan guard
-            r = h.clamp(0.0, self.r_max)
-            r_out = r[self.out_idx]                                   # (n_out,B)
+                hh = (1 - alpha) * hh + alpha * (gain * rec + drive)
+                hh = hh.clamp(-20.0, 20.0)                             # nan guard
+            r = hh.clamp(0.0, self.r_max)
+            r_out = r[self.out_idx]
             r_out = r_out - r_out.mean(0, keepdim=True)
-            logits = self.W_out @ r_out + self.b_out[:, None]         # (3,B)
-            ce = torch.nn.functional.cross_entropy(
-                logits.T, act[:, k], reduction="none")
-            tot = tot + (ce * mask[:, k]).sum()
-            h = h.detach()
-        loss = tot / mask.sum()
-        loss = loss + self.reg * ((self.raw_gain - self._gain0) ** 2
-                                  + (self.raw_alpha - self._alpha0) ** 2).sum()
-        return loss
+            logits = self.W_out @ r_out + self.b_out[:, None]          # (3,B)
+            ce = F.cross_entropy(logits.T, act[:, k], reduction="none")
+            loss_k = (ce * mask[:, k]).sum() / denom
+            if loss_k.requires_grad:
+                loss_k.backward()
+            total += float(loss_k)
+            h = hh.detach()
+
+        reg = self.reg * ((self.raw_gain - self._gain0) ** 2
+                          + (self.raw_alpha - self._alpha0) ** 2).sum()
+        reg.backward()
+        return total
 
     def to_theta(self):
         d = lambda x: x.detach().cpu().numpy()
@@ -201,11 +214,10 @@ def train_bc(cx, obs_mode, *, inner_steps, gain_init, epochs, batch,
         tl, nb = 0.0, 0
         for obs, act, mask in make_batches(data, batch, rng):
             opt.zero_grad()
-            loss = bc.seq_loss(obs, act, mask)
-            loss.backward()
+            loss = bc.accumulate_grads(obs, act, mask)
             torch.nn.utils.clip_grad_norm_(bc.params(), 5.0)
             opt.step()
-            tl += float(loss)
+            tl += loss
             nb += 1
         row = {"epoch": ep, "loss": tl / nb, "sec": time.time() - t0}
         if ep % 5 == 0 or ep == 1:
@@ -242,12 +254,12 @@ if __name__ == "__main__":
     ap.add_argument("--inner-steps", type=int, default=16)
     ap.add_argument("--gain-init", type=float, default=2.0)
     ap.add_argument("--epochs", type=int, default=40)
-    ap.add_argument("--batch", type=int, default=32)
+    ap.add_argument("--batch", type=int, default=24)
     ap.add_argument("--lr", type=float, default=1e-2)
     ap.add_argument("--reg", type=float, default=1e-3)
     ap.add_argument("--boards", type=int, nargs="+", default=[8, 10, 12])
     ap.add_argument("--eps-per-board", type=int, default=40)
-    ap.add_argument("--max-ticks", type=int, default=300)
+    ap.add_argument("--max-ticks", type=int, default=250)
     ap.add_argument("--board-eval", type=int, default=12)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="auto")
